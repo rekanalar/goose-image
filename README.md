@@ -14,7 +14,7 @@ Image decoding and encoding for Goose.
 Put this line in the root file of your program:
 
 ```goose
-import image from "rekanalar/goose-image@v1";
+import image from "rekanalar/goose-image@v0.1.0";
 ```
 
 The first run builds the C part of the package. It needs a C compiler on
@@ -24,7 +24,7 @@ the machine. It builds once, and the build is shared by every program.
 
 ```goose
 import std;
-import image from "rekanalar/goose-image@v1";
+import image from "rekanalar/goose-image@v0.1.0";
 
 fn main() {
     var img = image::load("photo.png");
