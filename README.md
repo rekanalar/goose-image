@@ -1,5 +1,7 @@
 # goose-image
 
+[![ci](https://github.com/rekanalar/goose-image/actions/workflows/ci.yml/badge.svg)](https://github.com/rekanalar/goose-image/actions/workflows/ci.yml)
+
 Image decoding and encoding for Goose.
 
 ## Features
