@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/rekanalar/goose-image/actions/workflows/ci.yml/badge.svg)](https://github.com/rekanalar/goose-image/actions/workflows/ci.yml)
 
-Image decoding and encoding for the Goose programming language.
+Image decoding and encoding for the [Goose](https://github.com/aardappel/goose) programming language.
 
 ## Features
 
