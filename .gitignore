@@ -5,3 +5,9 @@
 *.a
 /build/
 /out/
+
+# Test output
+/gradient.png
+/test-image.bmp
+/test-image.jpg
+/test-image.png
