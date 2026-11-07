@@ -375,6 +375,73 @@ fn test_geometry() {
     geometry_cases::check_rotate();
 }
 
+// test_hostile_size checks the calls that take a size or a place from the
+// caller. Nothing aborts and nothing touches a wrong pixel.
+fn test_hostile_size() {
+    // The limit of the buffer: 2147483647 bytes.
+    assert(image::size_ok(23170, 23170));
+    assert(!image::size_ok(23171, 23170));
+    assert(image::size_ok(536870911, 1));
+    assert(!image::size_ok(536870912, 1));
+    assert(!image::size_ok(0, 5));
+    assert(!image::size_ok(5, 0));
+    assert(!image::size_ok(-5, 3));
+    assert(!image::size_ok(2147483647, 2147483647));
+
+    // pixel and set_pixel on an image whose size does not match the buffer.
+    var huge = image::Image { width: 2147483647, height: 2147483647, pixels: [1, 2, 3, 4] };
+    let r, g, b, a = image::pixel(huge, 1, 1);
+    assert(r == 0 && g == 0 && b == 0 && a == 0);
+    let r0, g0, b0, a0 = image::pixel(huge, 0, 0);
+    assert(r0 == 1 && g0 == 2 && b0 == 3 && a0 == 4);
+    let r1, g1, b1, a1 = image::pixel(huge, 2147483646, 2147483646);
+    assert(r1 == 0 && g1 == 0 && b1 == 0 && a1 == 0);
+    image::set_pixel(huge, 1, 1, 9, 9, 9, 9);
+    image::set_pixel(huge, 2147483646, 2147483646, 9, 9, 9, 9);
+    image::set_pixel(huge, -1, 0, 9, 9, 9, 9);
+    let first: u8[4] = [1, 2, 3, 4];
+    assert(huge.pixels == first);
+    image::set_pixel(huge, 0, 0, 5, 6, 7, 8);
+    let second: u8[4] = [5, 6, 7, 8];
+    assert(huge.pixels == second);
+
+    // new_image gives the empty image for a bad size.
+    let bad_w: i32[4] = [2147483647, -5, 0, 3];
+    let bad_h: i32[4] = [2147483647, 3, 3, 0];
+    for i in 0..4 {
+        let e = image::new_image(bad_w[i], bad_h[i], 1, 2, 3, 4);
+        assert(e.width == 0 && e.height == 0 && e.pixels.len == 0);
+    }
+    let big = image::new_image(536870912, 1, 1, 2, 3, 4);
+    assert(big.width == 0 && big.height == 0 && big.pixels.len == 0);
+    // A size that worked before gives the same image.
+    let ok = image::new_image(3, 2, 1, 2, 3, 4);
+    assert(ok.width == 3 && ok.height == 2 && ok.pixels.len == 24);
+    assert(ok.pixels[0] == 1 && ok.pixels[1] == 2 && ok.pixels[2] == 3 && ok.pixels[3] == 4);
+    assert(ok.pixels[23] == 4);
+
+    // A buffer longer than the size needs: the size rules, the extra bytes stay.
+    var longer = image::new_image(2, 4, 7, 7, 7, 7);
+    longer.height = 2;
+    image::set_pixel(longer, 1, 1, 9, 9, 9, 9);
+    let lr, lg, lb, la = image::pixel(longer, 1, 1);
+    assert(lr == 9 && lg == 9 && lb == 9 && la == 9);
+    let nr, ng, nb, na = image::pixel(longer, 2, 0);
+    assert(nr == 0 && ng == 0 && nb == 0 && na == 0);
+    assert(longer.pixels.len == 32 && longer.pixels[16] == 7 && longer.pixels[31] == 7);
+
+    // resize, fit, encode and write_with refuse the mismatched image.
+    let rs = image::resize(huge, 4, 4, image::FILTER_BOX);
+    assert(rs.width == 0 && rs.pixels.len == 0);
+    let ft = image::fit(huge, 4, 4, image::FILTER_BOX);
+    assert(ft.width == 0 && ft.pixels.len == 0);
+    let small = image::new_image(2, 2, 1, 2, 3, 4);
+    let rt = image::resize(small, 536870912, 1, image::FILTER_BOX);
+    assert(rt.width == 0 && rt.pixels.len == 0);
+    assert(image::encode(huge, image::FORMAT_PNG, 0).len == 0);
+    assert(!image::write_with("tmp-hostile.png", huge, image::FORMAT_PNG, 0));
+}
+
 fn main() {
     test_round_trip();
     test_info();
@@ -385,6 +452,7 @@ fn main() {
     test_metadata();
     test_resize();
     test_geometry();
+    test_hostile_size();
     print("all tests passed");
     return 0;
 }

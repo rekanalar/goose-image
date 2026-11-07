@@ -47,6 +47,19 @@ fn fits_limit(w: i64, h: i64) -> bool {
     return w * h * 4 <= MAX_RESULT_BYTES;
 }
 
+// The most bytes that a buffer may hold. The C code indexes a row with an
+// i32, so a larger buffer is not safe.
+const MAX_BUFFER_BYTES: i64 = 2147483647;
+
+// size_ok tells whether w by h pixels fit a buffer of at most
+// MAX_BUFFER_BYTES. A side at or below zero does not fit.
+fn size_ok(w: i64, h: i64) -> bool {
+    if w <= 0 || h <= 0 { return false; }
+    if w > MAX_BUFFER_BYTES || h > MAX_BUFFER_BYTES { return false; }
+    // The product of the sides is below 2^62 here, so it cannot overflow.
+    return w * h <= MAX_BUFFER_BYTES / 4;
+}
+
 // push_pixel appends the pixel at the place x, y of the image.
 fn push_pixel(out: u8[>..]&, img: Image&, x: i64, y: i64) {
     let at = (y * img.width + x) * 4;

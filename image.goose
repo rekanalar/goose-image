@@ -138,6 +138,7 @@ fn info(path: const u8[:]) -> i32, i32, bool {
 // The result is empty when the encode fails.
 fn encode(img: Image&, format: i32, param: i32) -> u8[] {
     var out: u8[>..] = [];
+    if !size_ok(img.width, img.height) { return []; }
     if !img_encode(img.pixels, out, img.width, img.height, format, param) {
         return [];
     }
@@ -147,6 +148,7 @@ fn encode(img: Image&, format: i32, param: i32) -> u8[] {
 // write_with writes the image to the path. The param is as for encode.
 fn write_with(path: const u8[:], img: Image&, format: i32, param: i32) -> bool {
     var out: u8[>..] = [];
+    if !size_ok(img.width, img.height) { return false; }
     if !img_encode(img.pixels, out, img.width, img.height, format, param) { return false; }
     return write_file(path, out);
 }
@@ -185,6 +187,7 @@ fn write_hdr(path: const u8[:], img: Image&) -> bool {
 // resize scales the image to the size with the filter. It returns an empty
 // image when the size is below one or the filter is not a FILTER constant.
 fn resize(img: Image&, width: i32, height: i32, filter: i32) -> Image {
+    if !size_ok(img.width, img.height) || !size_ok(width, height) { return empty_image(); }
     var out: u8[>..] = [];
     let dims: i32[5] = [img.width, img.height, width, height, filter];
     if !img_resize(img.pixels, out, dims) {
@@ -219,8 +222,12 @@ fn fit(img: Image&, max_width: i32, max_height: i32, filter: i32) -> Image {
 // is outside the image.
 fn pixel(img: Image&, x: i32, y: i32) -> u8, u8, u8, u8 {
     if x < 0 || y < 0 || x >= img.width || y >= img.height { return 0, 0, 0, 0; }
-    let at = (y * img.width + x) * 4;
-    if at + 3 >= img.pixels.len { return 0, 0, 0, 0; }
+    // The index is computed in 64 bits. A hostile size cannot wrap it.
+    let w: i64 = img.width;
+    let n = y * w + x;
+    // Compare the pixel number before the times four, which can overflow.
+    if n >= img.pixels.len / 4 { return 0, 0, 0, 0; }
+    let at = n * 4;
     return img.pixels[at], img.pixels[at + 1], img.pixels[at + 2], img.pixels[at + 3];
 }
 
@@ -228,8 +235,10 @@ fn pixel(img: Image&, x: i32, y: i32) -> u8, u8, u8, u8 {
 // 255. It does nothing when the place is outside the image.
 fn set_pixel(img: Image&, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
     if x < 0 || y < 0 || x >= img.width || y >= img.height { return; }
-    let at = (y * img.width + x) * 4;
-    if at + 3 >= img.pixels.len { return; }
+    let w: i64 = img.width;
+    let n = y * w + x;
+    if n >= img.pixels.len / 4 { return; }
+    let at = n * 4;
     img.pixels[at] = r;
     img.pixels[at + 1] = g;
     img.pixels[at + 2] = b;
@@ -239,6 +248,7 @@ fn set_pixel(img: Image&, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
 // new_image makes an image of the size, filled with one color. The color
 // parts run from 0 to 255.
 fn new_image(width: i32, height: i32, r: u8, g: u8, b: u8, a: u8) -> Image {
+    if !size_ok(width, height) { return empty_image(); }
     var pixels: u8[>..] = [];
     for i in 0..width * height * 4 {
         pixels.push(if i % 4 == 0 { r } else if i % 4 == 1 { g } else if i % 4 == 2 { b } else { a });

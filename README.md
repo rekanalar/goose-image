@@ -36,6 +36,11 @@ Image decoding and encoding for the [Goose](https://github.com/aardappel/goose) 
   The sampling of `rotate` is nearest.
 - The filters are those of stb_image_resize2. They are not the filters of
   Pillow, so the pixels differ from Pillow output.
+- A hostile `Image` never makes a call abort. The width, the height and the
+  buffer may disagree. `pixel` then gives 0, 0, 0, 0 and `set_pixel` changes
+  nothing. `new_image` gives the empty image for a side at or below zero.
+  It does the same when the buffer would pass 2147483647 bytes. `resize`,
+  `fit` and `encode` give the empty image or false in that case.
 - A path longer than 4095 bytes fails. A file over 2 GiB fails.
 
 ## Install
@@ -43,7 +48,7 @@ Image decoding and encoding for the [Goose](https://github.com/aardappel/goose) 
 Put this line in the root file of your program:
 
 ```goose
-import image from "rekanalar/goose-image@v0.3.0";
+import image from "rekanalar/goose-image@v0.3.1";
 ```
 
 The first run builds the C part of the package. It needs a C compiler on
@@ -53,7 +58,7 @@ the machine. It builds once, and the build is shared by every program.
 
 ```goose
 import std;
-import image from "rekanalar/goose-image@v0.3.0";
+import image from "rekanalar/goose-image@v0.3.1";
 
 fn main() {
     var img = image::load("photo.png");
