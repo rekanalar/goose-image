@@ -54,6 +54,9 @@ import image from "rekanalar/goose-image@v0.3.1";
 The first run builds the C part of the package. It needs a C compiler on
 the machine. It builds once, and the build is shared by every program.
 
+The CI runs the gate on Linux, macOS and Windows. It uses Goose v2026.4
+and v2026.3 on each.
+
 ## Example
 
 ```goose
