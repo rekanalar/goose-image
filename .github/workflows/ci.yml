@@ -55,6 +55,25 @@ jobs:
         env:
           GOOSE_HOME: ${{ runner.temp }}/goose-home
 
+      - name: Run the test suite in the debug build
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          goose run --debug test/run.goose 2>&1 | tee test-debug-output.txt
+        env:
+          GOOSE_HOME: ${{ runner.temp }}/goose-home
+
+      - name: Run the examples
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          for f in examples/*.goose; do
+            echo "--- $f"
+            goose run "$f"
+          done
+        env:
+          GOOSE_HOME: ${{ runner.temp }}/goose-home
+
       - name: Report the failure
         if: failure()
         run: |
