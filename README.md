@@ -16,12 +16,46 @@ Image decoding and encoding for the [Goose](https://github.com/aardappel/goose) 
 - The pixels are RGBA, four bytes for each pixel.
 - No system library. The stb headers are part of the package.
 
+## Metadata
+
+The image carries two forms of metadata: the ICC profile and the EXIF
+block. A `load` or a `decode` fills the fields `icc` and `exif` of the
+`Image`. An `encode` or a write puts them back:
+
+- A JPEG takes the profile in APP2 markers of ICCPROFILE. A profile
+  of more than one part comes out as more than one marker. The EXIF
+  goes into one APP1 marker of Exif.
+- A PNG takes the profile in an iCCP chunk, and the EXIF in an eXIf
+  chunk.
+
+The `exif` field holds the raw TIFF block. Three calls read it:
+
+| Function | Result |
+|---|---|
+| `exif_value(block, tag)` | the raw bytes of the value of one tag |
+| `exif_text(block, tag)` | the value as a text, when it is ASCII |
+| `exif_short(block, tag)` | the value as a number, when it is a SHORT or a LONG |
+
+```goose
+let img = image::load("photo.jpg");
+let text = image::exif_text(img.exif, 0x010e);  // the description
+let orient = image::exif_short(img.exif, 0x0112);  // the orientation
+```
+
+A round trip of load and save keeps the bytes of both fields on JPEG
+and on PNG. The check ran the round trip against Pillow 13.0.0.
+
 ## Limits
 
 - No WebP. The stb headers cannot write it or read it. The package
   vendors no WebP code.
 - No AVIF, TIFF, GIF write or animation. A GIF read gives the first frame.
-- No EXIF, no ICC profile and no orientation. The package does not read them.
+- The EXIF reader names one tag per call and reads the first list of
+  tags. It reads no maker note and no GPS list. The writer of EXIF
+  takes a whole TIFF block; the package builds no TIFF block. Pillow
+  builds one in Python.
+- No orientation call. The caller reads the tag 0x0112 and calls
+  `transpose`.
 - Every read gives 8-bit RGBA. A 16-bit PNG loses its low byte.
 - HDR is written without alpha. It uses a 2.2 gamma, so the 8-bit values
   round trip within a small error.
@@ -48,7 +82,7 @@ Image decoding and encoding for the [Goose](https://github.com/aardappel/goose) 
 Put this line in the root file of your program:
 
 ```goose
-import image from "rekanalar/goose-image@v0.3.1";
+import image from "rekanalar/goose-image@v0.4.0";
 ```
 
 The first run builds the C part of the package. It needs a C compiler on
@@ -61,7 +95,7 @@ and v2026.3 on each.
 
 ```goose
 import std;
-import image from "rekanalar/goose-image@v0.3.1";
+import image from "rekanalar/goose-image@v0.4.0";
 
 fn main() {
     var img = image::load("photo.png");
@@ -93,6 +127,7 @@ fn main() {
 | `pixel(img, x, y)` | the color of one pixel, as four parts |
 | `set_pixel(img, x, y, r, g, b, a)` | writes one color into the image |
 | `new_image(w, h, r, g, b, a)` | makes an image of the size in one color |
+| `exif_value(block, tag)`, `exif_text`, `exif_short` | read one tag of the EXIF block |
 
 ## Constants
 
@@ -118,6 +153,8 @@ struct Image {
     width: i32,
     height: i32,
     pixels: u8[],   // RGBA, four bytes for each pixel, row by row
+    icc: u8[],      // the bytes of the ICC profile, empty when none
+    exif: u8[],     // the TIFF block of the EXIF, empty when none
 }
 ```
 

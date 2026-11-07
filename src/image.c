@@ -192,3 +192,281 @@ uint8_t img_resize(img_slice src, gs_rref out, img_islice dims) {
     free(res);
     return 1;
 }
+
+// ---- Metadata: the ICC profile and the EXIF block ----
+//
+// A JPEG carries the profile in one or more APP2 markers that hold
+// ICC_PROFILE, a part number and a part count. It carries the EXIF in
+// one APP1 marker that holds Exif, two zero bytes and the TIFF block.
+// A PNG carries the profile in an iCCP chunk and the EXIF in an eXIf
+// chunk.
+
+// crc32 of the PNG chunks, bit by bit. The table is small enough to
+// compute in place. The form with the running value continues over a
+// second block.
+static uint32_t crc32_update(uint32_t crc, const uint8_t *p, int64_t n) {
+    for (int64_t i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xedb88320u & (uint32_t)(-(int32_t)(crc & 1)));
+        }
+    }
+    return crc;
+}
+static uint32_t crc32_of(const uint8_t *p, int64_t n) {
+    return crc32_update(0xffffffffu, p, n) ^ 0xffffffffu;
+}
+
+static uint32_t adler32_of(const uint8_t *p, int64_t n) {
+    uint32_t a = 1, b = 0;
+    for (int64_t i = 0; i < n; i++) {
+        a = (a + p[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+}
+
+// big16 and big32 read the big endian numbers of PNG and TIFF.
+static uint32_t big32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+static uint32_t big16(const uint8_t *p) {
+    return ((uint32_t)p[0] << 8) | (uint32_t)p[1];
+}
+
+// put16 and put32 write big endian.
+static void put16(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
+}
+// lit16 writes the little endian form that a stored block of DEFLATE
+// uses.
+static void lit16(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+}
+static void put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+
+// app2_of_one_part makes one APP2 marker of the profile. The part is
+// one based, the count is the count of the parts.
+static void app2_marker(gs_rref out, const uint8_t *part, int64_t n,
+                        int part_no, int part_count) {
+    uint8_t head[18];
+    put16(head, 0xffe2);
+    // The length counts the length bytes itself: the name, the two
+    // numbers and the part.
+    int64_t payload = 14 + n;
+    put16(head + 2, (uint32_t)(payload + 2));
+    memcpy(head + 4, "ICC_PROFILE\0", 12);
+    head[16] = (uint8_t)part_no;
+    head[17] = (uint8_t)part_count;
+    gs_bld_append(out, head, 18);
+    gs_bld_append(out, part, n);
+}
+
+// app1_of makes one APP1 marker of the EXIF. The block holds the TIFF
+// bytes, without the Exif header.
+static void app1_marker(gs_rref out, const uint8_t *block, int64_t n) {
+    uint8_t head[14];
+    put16(head, 0xffe1);
+    int64_t payload = 6 + n; // Exif\0\0 + block
+    put16(head + 2, (uint32_t)(payload + 2));
+    memcpy(head + 4, "Exif\0\0", 6);
+    gs_bld_append(out, head, 10);
+    gs_bld_append(out, block, n);
+}
+
+// png_chunk makes one PNG chunk with its CRC.
+static void png_chunk(gs_rref out, const char *kind, const uint8_t *body,
+                      int64_t n) {
+    uint8_t head[8];
+    put32(head, (uint32_t)n);
+    memcpy(head + 4, kind, 4);
+    gs_bld_append(out, head, 8);
+    gs_bld_append(out, body, n);
+    uint8_t crc[4];
+    uint32_t c = crc32_update(0xffffffffu, (const uint8_t *)kind, 4);
+    c = crc32_update(c, body, n) ^ 0xffffffffu;
+    put32(crc, c);
+    gs_bld_append(out, crc, 4);
+}
+
+// img_meta reads the ICC profile and the EXIF block of encoded bytes.
+// The profile goes out joined. The EXIF goes out as the TIFF block,
+// without the header of the marker. It gives 1 when the format is one
+// of the two and the walk found no fault.
+uint8_t img_meta(img_slice data, gs_rref icc, gs_rref exif) {
+    if (data.len < 8) return 0;
+    const uint8_t *b = data.data;
+    if (b[0] == 0xff && b[1] == 0xd8) {
+        // The walk of the markers of JPEG.
+        int64_t at = 2;
+        int parts_seen = 0, parts_want = 0;
+        uint8_t *part[255];
+        int64_t part_len[255];
+        memset(part, 0, sizeof(part));
+        memset(part_len, 0, sizeof(part_len));
+        while (at + 4 <= data.len) {
+            if (b[at] != 0xff) break;
+            uint8_t mark = b[at + 1];
+            if (mark == 0xd8 || (mark >= 0xd0 && mark <= 0xd9)) {
+                at += 2;
+                continue;
+            }
+            if (at + 4 > data.len) break;
+            int64_t seg = big16(b + at + 2);
+            if (at + 2 + seg > data.len) break;
+            const uint8_t *body = b + at + 4;
+            int64_t body_len = seg - 2;
+            if (mark == 0xe2 && body_len > 14 &&
+                memcmp(body, "ICC_PROFILE\0", 12) == 0) {
+                int no = body[12];
+                int count = body[13];
+                if (no >= 1 && no <= 255 && count >= 1 && count <= 255) {
+                    if (parts_want == 0) parts_want = count;
+                    if (no >= 1 && no <= 255 && part[no - 1] == NULL) {
+                        part[no - 1] = (uint8_t *)body + 14;
+                        part_len[no - 1] = body_len - 14;
+                        parts_seen++;
+                    }
+                }
+            } else if (mark == 0xe1 && body_len > 8 &&
+                       memcmp(body, "Exif\0\0", 6) == 0) {
+                gs_bld_append(exif, body + 6, body_len - 6);
+            }
+            at += 2 + seg;
+            if (mark == 0xda) break; // the scan starts
+        }
+        for (int i = 0; i < parts_want && i < 255; i++) {
+            if (part[i]) gs_bld_append(icc, part[i], part_len[i]);
+        }
+        (void)parts_seen;
+        return 1;
+    }
+    if (b[0] == 0x89 && memcmp(b + 1, "PNG\r\n\x1a\n", 7) == 0) {
+        // The walk of the chunks of PNG.
+        int64_t at = 8;
+        while (at + 12 <= data.len) {
+            uint32_t n = big32(b + at);
+            if (at + 12 + (int64_t)n > data.len) break;
+            const uint8_t *kind = b + at + 4;
+            const uint8_t *body = b + at + 8;
+            if (memcmp(kind, "iCCP", 4) == 0 && n > 2) {
+                // The name, a zero, the method, the zlib stream.
+                int64_t name_end = 0;
+                while (name_end < n && body[name_end] != 0) name_end++;
+                if (name_end + 2 < n) {
+                    const uint8_t *z = body + name_end + 2;
+                    int64_t zlen = n - name_end - 2;
+                    int out_len = 0;
+                    char *raw = stbi_zlib_decode_malloc((const char *)z,
+                                                        (int)zlen, &out_len);
+                    if (raw) {
+                        gs_bld_append(icc, raw, out_len);
+                        stbi_image_free(raw);
+                    }
+                }
+            } else if (memcmp(kind, "eXIf", 4) == 0) {
+                gs_bld_append(exif, body, n);
+            }
+            at += 12 + n;
+            if (memcmp(kind, "IEND", 4) == 0) break;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+// img_meta_encode puts the ICC profile and the EXIF block into an
+// image that img_encode made. The base holds the bytes of the image.
+// A JPEG takes APP1 before APP2, both after SOI. A PNG takes eXIf
+// before iCCP, both after IHDR. The base goes out first in every
+// case, and the metadata follows where it fits. It gives 0 when the
+// base is not a PNG or a JPEG of this package.
+uint8_t img_meta_encode(img_slice base, gs_rref out, img_slice icc,
+                        img_slice exif) {
+    if (base.len < 12) return 0;
+    const uint8_t *b = base.data;
+    if (b[0] == 0xff && b[1] == 0xd8) {
+        gs_bld_append(out, b, 2);
+        if (exif.len > 0 && exif.len <= 65527) app1_marker(out, exif.data, exif.len);
+        if (icc.len > 0) {
+            int64_t max_part = 65533 - 18;
+            int64_t n = icc.len;
+            int count = (int)((n + max_part - 1) / max_part);
+            if (count > 255) return 0;
+            for (int i = 0; i < count; i++) {
+                int64_t at = (int64_t)i * max_part;
+                int64_t take = n - at;
+                if (take > max_part) take = max_part;
+                app2_marker(out, icc.data + at, take, i + 1, count);
+            }
+        }
+        gs_bld_append(out, b + 2, base.len - 2);
+        return 1;
+    }
+    if (b[0] == 0x89 && memcmp(b + 1, "PNG\r\n\x1a\n", 7) == 0) {
+        // The IHDR chunk is always the first. The metadata chunks go
+        // behind it.
+        uint32_t ihdr_len = big32(b + 8);
+        if (memcmp(b + 12, "IHDR", 4) != 0) return 0;
+        int64_t at = 16 + (int64_t)ihdr_len + 4; // behind the CRC
+        if (at > base.len) return 0;
+        gs_bld_append(out, b, at);
+        if (exif.len > 0 && exif.len <= 0x7fffffff) {
+            png_chunk(out, "eXIf", exif.data, exif.len);
+        }
+        if (icc.len > 0) {
+            // The body of iCCP holds a name, a zero, the method and
+            // the zlib stream. The stream holds stored blocks, so its
+            // length is known before the write.
+            static const char name[4] = { 'i', 'c', 'c', 0 };
+            int64_t n = icc.len;
+            int64_t parts = (n + 65534) / 65535;
+            if (parts < 1) parts = 1;
+            int64_t zlen = 2 + 4 + n + parts * 5;
+            int64_t body_len = 5 + zlen;
+            uint8_t head[8];
+            put32(head, (uint32_t)body_len);
+            memcpy(head + 4, "iCCP", 4);
+            gs_bld_append(out, head, 8);
+            uint32_t c = crc32_update(0xffffffffu, (const uint8_t *)"iCCP", 4);
+            uint8_t nm[5];
+            memcpy(nm, name, 4);
+            nm[4] = 0; // the method of compression
+            c = crc32_update(c, nm, 5);
+            gs_bld_append(out, nm, 5);
+            uint8_t zh[2] = { 0x78, 0x01 };
+            c = crc32_update(c, zh, 2);
+            gs_bld_append(out, zh, 2);
+            int64_t off = 0;
+            for (int64_t i = 0; i < parts; i++) {
+                int64_t take = n - off;
+                if (take > 65535) take = 65535;
+                uint8_t bh[5];
+                bh[0] = (off + take >= n) ? 1 : 0;
+                lit16(bh + 1, (uint32_t)take);
+                lit16(bh + 3, (uint32_t)(~(uint32_t)take & 0xffff));
+                c = crc32_update(c, bh, 5);
+                gs_bld_append(out, bh, 5);
+                if (take > 0) {
+                    c = crc32_update(c, icc.data + off, take);
+                    gs_bld_append(out, icc.data + off, take);
+                }
+                off += take;
+            }
+            uint8_t tail[4];
+            put32(tail, adler32_of(icc.data, n));
+            c = crc32_update(c, tail, 4);
+            gs_bld_append(out, tail, 4);
+            uint8_t crcb[4];
+            put32(crcb, c ^ 0xffffffffu);
+            gs_bld_append(out, crcb, 4);
+        }
+        gs_bld_append(out, b + at, base.len - at);
+        return 1;
+    }
+    return 0;
+}

@@ -27,7 +27,7 @@ const MAX_RESULT_BYTES: i64 = 1073741824;
 
 // empty_image gives an image with no pixels.
 fn empty_image() -> Image {
-    return Image { width: 0, height: 0, pixels: [] };
+    return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] };
 }
 
 // is_whole tells whether the image has a positive size and a full buffer.
@@ -101,7 +101,7 @@ fn crop(img: Image&, left: i32, top: i32, right: i32, bottom: i32) -> Image {
             }
         }
     }
-    return Image { width: w as i32, height: h as i32, pixels: out[..] };
+    return Image { width: w as i32, height: h as i32, pixels: out[..], icc: copy(img.icc), exif: copy(img.exif) };
 }
 
 // transpose flips or turns the image. The turns are counter-clockwise. An
@@ -148,7 +148,7 @@ fn transpose(img: Image&, op: i32) -> Image {
             push_pixel(out, img, cx + ax * x + bx * y, cy + ay * x + by * y);
         }
     }
-    return Image { width: rw as i32, height: rh as i32, pixels: out[..] };
+    return Image { width: rw as i32, height: rh as i32, pixels: out[..], icc: copy(img.icc), exif: copy(img.exif) };
 }
 
 // clip_part copies the part of the source that lands inside the destination
@@ -367,5 +367,5 @@ fn rotate(img: Image&, degrees: f64, expand: bool) -> Image {
             }
         }
     }
-    return Image { width: rw as i32, height: rh as i32, pixels: out[..] };
+    return Image { width: rw as i32, height: rh as i32, pixels: out[..], icc: copy(img.icc), exif: copy(img.exif) };
 }

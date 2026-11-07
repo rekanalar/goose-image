@@ -4,6 +4,7 @@
 // the read image must hold the colors that were written.
 
 import std;
+import os;
 import image from "..";
 import geometry_cases;
 
@@ -127,7 +128,7 @@ fn test_options() {
         assert(back.width == 32 && back.pixels[0] == 9);
     }
     // A bad image does not encode.
-    let none = image::Image { width: 4, height: 4, pixels: [] };
+    let none = image::Image { width: 4, height: 4, pixels: [], icc: [], exif: [] };
     assert(image::encode(none, image::FORMAT_PNG, 0).len == 0);
 }
 
@@ -242,8 +243,8 @@ fn test_geometry_contract() {
     assert(is_empty(image::transpose(img, 7)));
 
     // An empty image and a short buffer count as empty.
-    let none = image::Image { width: 0, height: 0, pixels: [] };
-    let short = image::Image { width: 4, height: 3, pixels: [1, 2, 3] };
+    let none = image::Image { width: 0, height: 0, pixels: [], icc: [], exif: [] };
+    let short = image::Image { width: 4, height: 3, pixels: [1, 2, 3], icc: [], exif: [] };
     assert(is_empty(image::crop(none, 0, 0, 1, 1)));
     assert(is_empty(image::crop(short, 0, 0, 1, 1)));
     assert(is_empty(image::transpose(none, 0)));
@@ -270,7 +271,7 @@ fn test_geometry_contract() {
     // An image with a huge size and a short buffer is empty. The count of
     // the pixels overflows when it is computed with the four bytes of each
     // pixel, so the test must not abort.
-    let huge = image::Image { width: 2147483647, height: 2147483647, pixels: [1, 2, 3, 4] };
+    let huge = image::Image { width: 2147483647, height: 2147483647, pixels: [1, 2, 3, 4], icc: [], exif: [] };
     assert(is_empty(image::crop(huge, 0, 0, 10, 10)));
     assert(is_empty(image::transpose(huge, 2)));
     assert(is_empty(image::rotate(huge, 30.0, true)));
@@ -389,7 +390,7 @@ fn test_hostile_size() {
     assert(!image::size_ok(2147483647, 2147483647));
 
     // pixel and set_pixel on an image whose size does not match the buffer.
-    var huge = image::Image { width: 2147483647, height: 2147483647, pixels: [1, 2, 3, 4] };
+    var huge = image::Image { width: 2147483647, height: 2147483647, pixels: [1, 2, 3, 4], icc: [], exif: [] };
     let r, g, b, a = image::pixel(huge, 1, 1);
     assert(r == 0 && g == 0 && b == 0 && a == 0);
     let r0, g0, b0, a0 = image::pixel(huge, 0, 0);
@@ -442,7 +443,54 @@ fn test_hostile_size() {
     assert(!image::write_with("tmp-hostile.png", huge, image::FORMAT_PNG, 0));
 }
 
+
+// The metadata cases: the ICC profile and the EXIF block ride with
+// the file, on JPEG and on PNG.
+fn meta_cases() {
+    var jpg: u8[>..] = [];
+    assert(read_file("test/meta-audit.jpg", jpg));
+    assert(jpg.len > 0);
+    let img = image::decode(jpg);
+    assert(img.width == 4);
+    assert(img.icc.len == 2048);
+    assert(img.exif.len == 62);
+    assert(img.exif[0] == 0x4d);
+
+    // The tag reader: the description and the orientation.
+    let text = image::exif_text(img.exif[..], 0x010e);
+    assert(text == "goose image description");
+    let orient = image::exif_short(img.exif[..], 0x0112);
+    assert(orient == 1);
+
+    // A round trip through encode keeps both fields, on JPEG and on
+    // PNG.
+    let jb = image::encode(img, image::FORMAT_JPEG, 90);
+    let jback = image::decode(jb);
+    assert(jback.icc[..] == img.icc[..]);
+    assert(jback.exif[..] == img.exif[..]);
+    let pb = image::encode(img, image::FORMAT_PNG, 8);
+    let pback = image::decode(pb);
+    assert(pback.icc[..] == img.icc[..]);
+    assert(pback.exif[..] == img.exif[..]);
+
+    // A write without metadata makes no marker.
+    let plain = image::new_image(4, 4, 1, 2, 3, 255);
+    let jb2 = image::encode(plain, image::FORMAT_JPEG, 90);
+    let plainback = image::decode(jb2);
+    assert(plainback.icc.len == 0);
+    assert(plainback.exif.len == 0);
+
+    // A truncated APP part never aborts and gives an empty field.
+    var cut: u8[>..] = [];
+    cut.append(jpg[..40]);
+    let cback = image::decode(cut[..]);
+    assert(cback.icc.len == 0);
+
+    print("metadata cases ok\n");
+}
+
 fn main() {
+    meta_cases();
     test_round_trip();
     test_info();
     test_load_failure();

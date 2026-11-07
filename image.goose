@@ -19,6 +19,7 @@ namespace image;
 import std;
 import os;
 import geometry;
+import exif;
 
 // The C functions of the package. The definitions are in src/image.c.
 // Each one takes eight argument slots or fewer (the TinyCC JIT on arm64).
@@ -28,6 +29,8 @@ extern fn img_probe_path(path: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i3
 extern fn img_probe(data: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -> bool;
 extern fn img_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, format: i32, param: i32) -> bool;
 extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
+extern fn img_meta(data: const u8[:], icc: u8[>..]&, exif: u8[>..]&) -> bool;
+extern fn img_meta_encode(base: const u8[:], out: u8[>..]&, icc: const u8[:], exif: const u8[:]) -> bool;
 
 // The format numbers that encode and write take.
 const FORMAT_PNG = 0;
@@ -59,11 +62,15 @@ const FILTER_BSPLINE = 6;
 const FILTER_LANCZOS = 7;
 
 // Image holds the pixels of an image. The pixels are RGBA, four bytes for
-// each pixel. The rows follow each other.
+// each pixel. The rows follow each other. icc holds the bytes of the
+// ICC profile, and exif holds the TIFF block of the EXIF. Both are
+// empty when the file carries none.
 struct Image {
     width: i32,
     height: i32,
     pixels: u8[],
+    icc: u8[],
+    exif: u8[],
 }
 
 // Meta is what the header of a file says. ok is false when the file is
@@ -83,9 +90,17 @@ fn load(path: const u8[:]) -> Image {
     var w: i32 = 0;
     var h: i32 = 0;
     if !img_load(path, pixels, w, h) {
-        return Image { width: 0, height: 0, pixels: [] };
+        return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] };
     }
-    return Image { width: w, height: h, pixels: pixels[..] };
+    // The metadata of the file. A read of the bytes costs one more
+    // walk of the file, and the metadata is small beside the pixels.
+    var icc: u8[>..] = [];
+    var exif: u8[>..] = [];
+    var data: u8[>..] = [];
+    if read_file(path, data) {
+        img_meta(data[..], icc, exif);
+    }
+    return Image { width: w, height: h, pixels: pixels[..], icc: icc[..], exif: exif[..] };
 }
 
 // decode reads an image from encoded bytes in memory. It returns an empty
@@ -95,9 +110,12 @@ fn decode(data: const u8[:]) -> Image {
     var w: i32 = 0;
     var h: i32 = 0;
     if !img_decode(data, pixels, w, h) {
-        return Image { width: 0, height: 0, pixels: [] };
+        return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] };
     }
-    return Image { width: w, height: h, pixels: pixels[..] };
+    var icc: u8[>..] = [];
+    var exif: u8[>..] = [];
+    img_meta(data, icc, exif);
+    return Image { width: w, height: h, pixels: pixels[..], icc: icc[..], exif: exif[..] };
 }
 
 // metadata reads the header of the file at the path. It does not decode
@@ -142,14 +160,21 @@ fn encode(img: Image&, format: i32, param: i32) -> u8[] {
     if !img_encode(img.pixels, out, img.width, img.height, format, param) {
         return [];
     }
+    if img.icc.len > 0 || img.exif.len > 0 {
+        if format != FORMAT_PNG && format != FORMAT_JPEG { return out[..]; }
+        var full: u8[>..] = [];
+        if !img_meta_encode(out[..], full, img.icc, img.exif) { return out[..]; }
+        return full[..];
+    }
     return out[..];
 }
 
 // write_with writes the image to the path. The param is as for encode.
+// The metadata of the image rides with the file.
 fn write_with(path: const u8[:], img: Image&, format: i32, param: i32) -> bool {
-    var out: u8[>..] = [];
     if !size_ok(img.width, img.height) { return false; }
-    if !img_encode(img.pixels, out, img.width, img.height, format, param) { return false; }
+    let out = encode(img, format, param);
+    if out.len == 0 { return false; }
     return write_file(path, out);
 }
 
@@ -191,16 +216,16 @@ fn resize(img: Image&, width: i32, height: i32, filter: i32) -> Image {
     var out: u8[>..] = [];
     let dims: i32[5] = [img.width, img.height, width, height, filter];
     if !img_resize(img.pixels, out, dims) {
-        return Image { width: 0, height: 0, pixels: [] };
+        return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] };
     }
-    return Image { width: width, height: height, pixels: out[..] };
+    return Image { width: width, height: height, pixels: out[..], icc: [], exif: [] };
 }
 
 // fit scales the image down or up to sit inside the box and keeps the
 // aspect ratio. A side never gets below one pixel.
 fn fit(img: Image&, max_width: i32, max_height: i32, filter: i32) -> Image {
     if img.width <= 0 || img.height <= 0 || max_width <= 0 || max_height <= 0 {
-        return Image { width: 0, height: 0, pixels: [] };
+        return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] };
     }
     let mw: i64 = max_width;
     let mh: i64 = max_height;
@@ -253,5 +278,5 @@ fn new_image(width: i32, height: i32, r: u8, g: u8, b: u8, a: u8) -> Image {
     for i in 0..width * height * 4 {
         pixels.push(if i % 4 == 0 { r } else if i % 4 == 1 { g } else if i % 4 == 2 { b } else { a });
     }
-    return Image { width: width, height: height, pixels: pixels[..] };
+    return Image { width: width, height: height, pixels: pixels[..], icc: [], exif: [] };
 }

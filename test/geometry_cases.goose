@@ -20,7 +20,7 @@ fn from_hex(w: i32, h: i32, s: u8[:]) -> image::Image {
         px.push(v as u8);
         i += 2;
     }
-    return image::Image { width: w, height: h, pixels: px[..] };
+    return image::Image { width: w, height: h, pixels: px[..], icc: [], exif: [] };
 }
 
 // same tells whether the image has the size and the pixels of the string.
