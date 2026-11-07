@@ -1,9 +1,11 @@
 // image - image decoding and encoding for Goose.
 //
-// The package reads PNG, JPEG, BMP, GIF and TGA files. It writes PNG, JPEG
-// and BMP files. The pixels are RGBA, four bytes each.
+// The package reads PNG, JPEG, BMP, GIF, TGA, PSD, HDR, PNM and PIC. It
+// writes PNG, JPEG, BMP, TGA and HDR, to a file or to memory, and it
+// resizes with several filters. The pixels are RGBA, four bytes each.
 //
-// The C part of the package wraps stb_image and stb_image_write. The
+// The C part of the package wraps stb_image, stb_image_write and
+// stb_image_resize2. The
 // headers are vendored in the vendor directory, so the package needs no
 // system library.
 //
@@ -15,16 +17,45 @@
 namespace image;
 
 import std;
+import os;
 
 // The C functions of the package. The definitions are in src/image.c.
+// Each one takes eight argument slots or fewer (the TinyCC JIT on arm64).
 extern fn img_load(path: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
-extern fn img_info(path: const u8[:], w: i32&, h: i32&) -> bool;
-extern fn img_write(path: const u8[:], pixels: const u8[:], w: i32, h: i32, format: i32) -> bool;
+extern fn img_decode(data: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
+extern fn img_probe_path(path: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -> bool;
+extern fn img_probe(data: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -> bool;
+extern fn img_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, format: i32, param: i32) -> bool;
+extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
 
-// The format numbers that img_write takes.
+// The format numbers that encode and write take.
 const FORMAT_PNG = 0;
 const FORMAT_JPEG = 1;
 const FORMAT_BMP = 2;
+const FORMAT_TGA = 3;
+const FORMAT_HDR = 4;
+
+// The kinds of file that metadata names. KIND_UNKNOWN is not a format.
+const KIND_UNKNOWN = 0;
+const KIND_PNG = 1;
+const KIND_JPEG = 2;
+const KIND_BMP = 3;
+const KIND_GIF = 4;
+const KIND_TGA = 5;
+const KIND_PSD = 6;
+const KIND_HDR = 7;
+const KIND_PNM = 8;
+const KIND_PIC = 9;
+
+// The filters of resize. FILTER_DEFAULT is Mitchell down and Catmull-Rom up.
+const FILTER_DEFAULT = 0;
+const FILTER_NEAREST = 1;
+const FILTER_BOX = 2;
+const FILTER_BILINEAR = 3;
+const FILTER_BICUBIC = 4;
+const FILTER_MITCHELL = 5;
+const FILTER_BSPLINE = 6;
+const FILTER_LANCZOS = 7;
 
 // Image holds the pixels of an image. The pixels are RGBA, four bytes for
 // each pixel. The rows follow each other.
@@ -32,6 +63,16 @@ struct Image {
     width: i32,
     height: i32,
     pixels: u8[],
+}
+
+// Meta is what the header of a file says. ok is false when the file is
+// not an image that the package reads. channels is the count in the file.
+struct Meta {
+    width: i32,
+    height: i32,
+    channels: i32,
+    kind: i32,
+    ok: bool,
 }
 
 // load reads the image at the path. It returns an empty image when the
@@ -46,19 +87,72 @@ fn load(path: const u8[:]) -> Image {
     return Image { width: w, height: h, pixels: pixels[..] };
 }
 
+// decode reads an image from encoded bytes in memory. It returns an empty
+// image when the bytes are not an image that the package reads.
+fn decode(data: const u8[:]) -> Image {
+    var pixels: u8[>..] = [];
+    var w: i32 = 0;
+    var h: i32 = 0;
+    if !img_decode(data, pixels, w, h) {
+        return Image { width: 0, height: 0, pixels: [] };
+    }
+    return Image { width: w, height: h, pixels: pixels[..] };
+}
+
+// metadata reads the header of the file at the path. It does not decode
+// the pixels.
+fn metadata(path: const u8[:]) -> Meta {
+    var w: i32 = 0;
+    var h: i32 = 0;
+    var ch: i32 = 0;
+    var kind: i32 = 0;
+    if !img_probe_path(path, w, h, ch, kind) {
+        return Meta { width: 0, height: 0, channels: 0, kind: 0, ok: false };
+    }
+    return Meta { width: w, height: h, channels: ch, kind: kind, ok: true };
+}
+
+// metadata_bytes is metadata for encoded bytes in memory.
+fn metadata_bytes(data: const u8[:]) -> Meta {
+    var w: i32 = 0;
+    var h: i32 = 0;
+    var ch: i32 = 0;
+    var kind: i32 = 0;
+    if !img_probe(data, w, h, ch, kind) {
+        return Meta { width: 0, height: 0, channels: 0, kind: 0, ok: false };
+    }
+    return Meta { width: w, height: h, channels: ch, kind: kind, ok: true };
+}
+
 // info gives the width and the height of the image at the path. It returns
 // false when the file is not an image that the package reads.
 fn info(path: const u8[:]) -> i32, i32, bool {
-    var w: i32 = 0;
-    var h: i32 = 0;
-    if !img_info(path, w, h) { return 0, 0, false; }
-    return w, h, true;
+    let m = metadata(path);
+    return m.width, m.height, m.ok;
 }
 
-// write writes the image to the path. The format is FORMAT_PNG,
-// FORMAT_JPEG or FORMAT_BMP. It returns false when the write fails.
+// encode gives the image as bytes in memory. The param is the JPEG quality
+// (1 to 100, default 90), the PNG level (1 to 9, default 8) or the TGA
+// run-length flag (1 on, 2 off, default on). The other formats ignore it.
+// The result is empty when the encode fails.
+fn encode(img: Image&, format: i32, param: i32) -> u8[] {
+    var out: u8[>..] = [];
+    if !img_encode(img.pixels, out, img.width, img.height, format, param) {
+        return [];
+    }
+    return out[..];
+}
+
+// write_with writes the image to the path. The param is as for encode.
+fn write_with(path: const u8[:], img: Image&, format: i32, param: i32) -> bool {
+    var out: u8[>..] = [];
+    if !img_encode(img.pixels, out, img.width, img.height, format, param) { return false; }
+    return write_file(path, out);
+}
+
+// write writes the image to the path with the default options.
 fn write(path: const u8[:], img: Image&, format: i32) -> bool {
-    return img_write(path, img.pixels, img.width, img.height, format);
+    return write_with(path, img, format, 0);
 }
 
 // write_png writes the image to the path as a PNG file.
@@ -74,6 +168,49 @@ fn write_jpeg(path: const u8[:], img: Image&) -> bool {
 // write_bmp writes the image to the path as a BMP file.
 fn write_bmp(path: const u8[:], img: Image&) -> bool {
     return write(path, img, FORMAT_BMP);
+}
+
+// write_tga writes the image to the path as a TGA file.
+fn write_tga(path: const u8[:], img: Image&) -> bool {
+    return write(path, img, FORMAT_TGA);
+}
+
+// write_hdr writes the image to the path as a Radiance HDR file. The alpha
+// part is lost.
+fn write_hdr(path: const u8[:], img: Image&) -> bool {
+    return write(path, img, FORMAT_HDR);
+}
+
+// resize scales the image to the size with the filter. It returns an empty
+// image when the size is below one or the filter is not a FILTER constant.
+fn resize(img: Image&, width: i32, height: i32, filter: i32) -> Image {
+    var out: u8[>..] = [];
+    let dims: i32[5] = [img.width, img.height, width, height, filter];
+    if !img_resize(img.pixels, out, dims) {
+        return Image { width: 0, height: 0, pixels: [] };
+    }
+    return Image { width: width, height: height, pixels: out[..] };
+}
+
+// fit scales the image down or up to sit inside the box and keeps the
+// aspect ratio. A side never gets below one pixel.
+fn fit(img: Image&, max_width: i32, max_height: i32, filter: i32) -> Image {
+    if img.width <= 0 || img.height <= 0 || max_width <= 0 || max_height <= 0 {
+        return Image { width: 0, height: 0, pixels: [] };
+    }
+    let mw: i64 = max_width;
+    let mh: i64 = max_height;
+    let iw: i64 = img.width;
+    let ih: i64 = img.height;
+    var w = max_width;
+    var h: i32 = (mw * ih / iw) as i32;
+    if mw * ih > mh * iw {
+        h = max_height;
+        w = (mh * iw / ih) as i32;
+    }
+    if w < 1 { w = 1; }
+    if h < 1 { h = 1; }
+    return resize(img, w, h, filter);
 }
 
 // pixel gives the color of one pixel. The color parts run from 0 to 255.
