@@ -18,6 +18,7 @@ namespace image;
 
 import std;
 import os;
+import geometry;
 
 // The C functions of the package. The definitions are in src/image.c.
 // Each one takes eight argument slots or fewer (the TinyCC JIT on arm64).

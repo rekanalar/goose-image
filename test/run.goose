@@ -5,6 +5,7 @@
 
 import std;
 import image from "..";
+import geometry_cases;
 
 fn test_round_trip() {
     // A 4x3 image: every pixel holds the color of its place.
@@ -210,6 +211,170 @@ fn test_resize() {
     assert(rt.width == 8 && rt.height == 8);
 }
 
+// is_empty tells whether the image has no pixels.
+fn is_empty(img: image::Image) -> bool {
+    return img.width == 0 && img.height == 0 && img.pixels.len == 0;
+}
+
+// test_geometry_contract checks the rules of the geometry calls that Pillow
+// does not state the same way: empty results, limits and hostile input.
+fn test_geometry_contract() {
+    var img = image::new_image(4, 3, 10, 20, 30, 255);
+    image::set_pixel(img, 1, 1, 200, 100, 50, 128);
+
+    // A box without area gives an empty image. Pillow raises an error for an
+    // inverted box and gives a side of zero for an empty one.
+    assert(is_empty(image::crop(img, 2, 0, 1, 1)));
+    assert(is_empty(image::crop(img, 1, 0, 1, 2)));
+    assert(is_empty(image::crop(img, 0, 3, 4, 3)));
+    // A box that is too large gives an empty image and does not abort.
+    assert(is_empty(image::crop(img, 0, 0, 2147483647, 2147483647)));
+    assert(is_empty(image::crop(img, -2147483647, -2147483647, 2147483647, 2147483647)));
+    assert(is_empty(image::crop(img, 0, 0, 40000, 40000)));
+    // A box far outside the image gives transparent black.
+    let far = image::crop(img, 1000, 1000, 1002, 1001);
+    assert(far.width == 2 && far.height == 1);
+    let r, g, b, a = image::pixel(far, 1, 0);
+    assert(r == 0 && g == 0 && b == 0 && a == 0);
+
+    // An unknown operation gives an empty image.
+    assert(is_empty(image::transpose(img, -1)));
+    assert(is_empty(image::transpose(img, 7)));
+
+    // An empty image and a short buffer count as empty.
+    let none = image::Image { width: 0, height: 0, pixels: [] };
+    let short = image::Image { width: 4, height: 3, pixels: [1, 2, 3] };
+    assert(is_empty(image::crop(none, 0, 0, 1, 1)));
+    assert(is_empty(image::crop(short, 0, 0, 1, 1)));
+    assert(is_empty(image::transpose(none, 0)));
+    assert(is_empty(image::transpose(short, 2)));
+    assert(is_empty(image::rotate(short, 30.0, true)));
+    assert(is_empty(image::rotate(none, 30.0, false)));
+
+    // A paste with an empty or short source leaves the destination as it is.
+    var dst = image::new_image(4, 3, 1, 2, 3, 4);
+    let before = dst.pixels;
+    image::paste(dst, none, 0, 0);
+    image::paste(dst, short, 0, 0);
+    image::alpha_composite(dst, none, 0, 0);
+    image::alpha_composite(dst, short, 0, 0);
+    assert(dst.pixels == before);
+    // A place far outside changes nothing and does not abort.
+    var small = image::new_image(2, 2, 9, 9, 9, 255);
+    image::paste(dst, small, 2147483647, 2147483647);
+    image::paste(dst, small, -2147483647, -2147483647);
+    image::alpha_composite(dst, small, 2147483647, -2147483647);
+    image::alpha_composite(dst, small, -100, -100);
+    assert(dst.pixels == before);
+
+    // An image with a huge size and a short buffer is empty. The count of
+    // the pixels overflows when it is computed with the four bytes of each
+    // pixel, so the test must not abort.
+    let huge = image::Image { width: 2147483647, height: 2147483647, pixels: [1, 2, 3, 4] };
+    assert(is_empty(image::crop(huge, 0, 0, 10, 10)));
+    assert(is_empty(image::transpose(huge, 2)));
+    assert(is_empty(image::rotate(huge, 30.0, true)));
+    var hdst = image::new_image(2, 2, 1, 2, 3, 4);
+    let hbefore = hdst.pixels;
+    image::paste(hdst, huge, 0, 0);
+    image::alpha_composite(hdst, huge, 0, 0);
+    assert(hdst.pixels == hbefore);
+
+    // An angle that is not a number gives an empty image.
+    let nan_angle = 0.0 / 0.0;
+    assert(is_empty(image::rotate(img, nan_angle, false)));
+    assert(is_empty(image::rotate(img, nan_angle, true)));
+
+    // An angle that is far too large gives an empty image.
+    assert(is_empty(image::rotate(img, 1.0e30, false)));
+    assert(is_empty(image::rotate(img, -1.0e30, true)));
+    // An angle of a full turn gives the same pixels.
+    let full = image::rotate(img, 360.0, false);
+    assert(full.width == 4 && full.height == 3 && full.pixels == img.pixels);
+    let twice = image::rotate(img, -360.0, true);
+    assert(twice.pixels == img.pixels);
+}
+
+// grid makes an image with a different value in every pixel.
+fn grid(w: i32, h: i32) -> image::Image {
+    var img = image::new_image(w, h, 0, 0, 0, 255);
+    for y: i32 in 0..h {
+        for x: i32 in 0..w {
+            image::set_pixel(img, x, y, (y * w + x) as u8, (x * 7) as u8, (y * 11) as u8, 255);
+        }
+    }
+    return img;
+}
+
+// test_paste_values checks one copy and one blend by hand.
+fn test_paste_values() {
+    var dst = image::new_image(3, 2, 10, 20, 30, 200);
+    var src = image::new_image(1, 1, 200, 100, 50, 128);
+    image::paste(dst, src, 1, 1);
+    let r, g, b, a = image::pixel(dst, 1, 1);
+    assert(r == 200 && g == 100 && b == 50 && a == 128);
+    let r0, g0, b0, a0 = image::pixel(dst, 0, 0);
+    assert(r0 == 10 && g0 == 20 && b0 == 30 && a0 == 200);
+    // The blend of the probe of the research file.
+    var base = image::new_image(1, 1, 10, 20, 30, 200);
+    image::alpha_composite(base, src, 0, 0);
+    let r1, g1, b1, a1 = image::pixel(base, 0, 0);
+    assert(r1 == 117 && g1 == 65 && b1 == 41 && a1 == 228);
+    // A paste of an image onto itself reads the source as it was before.
+    var overlap = grid(3, 3);
+    image::paste(overlap, overlap, 1, 1);
+    let p0, _, _, _ = image::pixel(overlap, 1, 1);
+    let p1, _, _, _ = image::pixel(overlap, 2, 1);
+    let p2, _, _, _ = image::pixel(overlap, 1, 2);
+    let p3, _, _, _ = image::pixel(overlap, 2, 2);
+    assert(p0 == 0 && p1 == 1 && p2 == 3 && p3 == 4);
+    // A source with no alpha leaves the destination as it is.
+    var clear = image::new_image(1, 1, 255, 255, 255, 0);
+    image::alpha_composite(base, clear, 0, 0);
+    let r2, g2, b2, a2 = image::pixel(base, 0, 0);
+    assert(r2 == 117 && g2 == 65 && b2 == 41 && a2 == 228);
+}
+
+// inverse_of gives the operation that undoes the operation. The turns of
+// 90 and 270 degrees undo each other. The other operations undo themselves.
+fn inverse_of(op: i32) -> i32 {
+    if op == image::TRANSPOSE_ROTATE_90 { return image::TRANSPOSE_ROTATE_270; }
+    if op == image::TRANSPOSE_ROTATE_270 { return image::TRANSPOSE_ROTATE_90; }
+    return op;
+}
+
+// check_inverse applies each operation and then its inverse to the image.
+fn check_inverse(img: image::Image&) {
+    for op: i32 in 0..7 {
+        var once = image::transpose(img, op);
+        let back = image::transpose(once, inverse_of(op));
+        assert(back.width == img.width && back.height == img.height);
+        assert(back.pixels == img.pixels);
+    }
+}
+
+// test_transpose_inverse checks that an operation and its inverse give the
+// source image back.
+fn test_transpose_inverse() {
+    var small = grid(3, 2);
+    check_inverse(small);
+    var square = grid(4, 4);
+    check_inverse(square);
+}
+
+// test_geometry runs the cases that Pillow made. The file
+// test/geometry_cases.goose holds them.
+fn test_geometry() {
+    test_geometry_contract();
+    test_transpose_inverse();
+    test_paste_values();
+    geometry_cases::check_crop();
+    geometry_cases::check_transpose();
+    geometry_cases::check_paste();
+    geometry_cases::check_blend();
+    geometry_cases::check_rotate();
+}
+
 fn main() {
     test_round_trip();
     test_info();
@@ -219,6 +384,7 @@ fn main() {
     test_files();
     test_metadata();
     test_resize();
+    test_geometry();
     print("all tests passed");
     return 0;
 }
