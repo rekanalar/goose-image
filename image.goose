@@ -33,6 +33,7 @@ extern fn img_jpeg(pixels: const u8[:], out: u8[>..]&, opts: const i32[:]) -> bo
 extern fn img_encode_webp(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, quality: i32, lossless: i32) -> bool;
 extern fn img_tiff_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, compression: i32) -> bool;
 extern fn img_tiff_pages(data: const u8[:]) -> i32;
+extern fn img_encode_avif(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, quality: i32, speed: i32) -> bool;
 extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
 extern fn img_decode16(data: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
 extern fn img_load16(path: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
@@ -216,6 +217,12 @@ fn encode(img: Image&, format: i32, param: i32) -> u8[] {
         }
         return out[..];
     }
+    if format == FORMAT_AVIF {
+        if !img_encode_avif(img.pixels, out, img.width, img.height, if param > 0 { param } else { 75 }, 6) {
+            return [];
+        }
+        return out[..];
+    }
     if !img_encode(img.pixels, out, img.width, img.height, format, param) {
         return [];
     }
@@ -271,6 +278,34 @@ fn encode_webp(img: Image&, quality: i32, lossless: bool) -> u8[] {
         return [];
     }
     return out[..];
+}
+
+// encode_avif gives the image as AVIF bytes. The quality runs from 0 to 100
+// and 100 is lossless. The speed runs from 0 (slow, small) to 9 (fast). Both
+// are clamped. The alpha part rides in a second item when any pixel is not
+// opaque. A side above 16384 or an output above 64 MiB gives an empty result.
+// AVIF holds no ICC or EXIF here.
+fn encode_avif(img: Image&, quality: i32, speed: i32) -> u8[] {
+    var out: u8[>..] = [];
+    if !size_ok(img.width, img.height) { return []; }
+    if !img_encode_avif(img.pixels, out, img.width, img.height, quality, speed) {
+        return [];
+    }
+    return out[..];
+}
+
+// write_avif_with writes the image to the path as an AVIF file. The options
+// are as for encode_avif.
+fn write_avif_with(path: const u8[:], img: Image&, quality: i32, speed: i32) -> bool {
+    let out = encode_avif(img, quality, speed);
+    if out.len == 0 { return false; }
+    return write_file(path, out);
+}
+
+// write_avif writes the image to the path as an AVIF file, with quality 75
+// and speed 6, the defaults of Pillow.
+fn write_avif(path: const u8[:], img: Image&) -> bool {
+    return write_avif_with(path, img, 75, 6);
 }
 
 // write_jpeg_with writes the image to the path as a JPEG file. The options

@@ -18,3 +18,5 @@
 /test/run
 /test-image*.tif
 /gradient.tif
+/test-avif-enc-*.avif
+/gradient.avif

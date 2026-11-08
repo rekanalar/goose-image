@@ -137,14 +137,15 @@ typedef struct {
 
 // read_obu_seq_header parses the first sequence header OBU of the stream.
 // It returns 1 on success. libaom writes a reduced still picture header
-// here; a full header stream fails on purpose.
+// for a still image; any other header fails on purpose.
 static int read_obu_seq_header(const uint8_t *p, int64_t len, SeqInfo *si) {
     memset(si, 0, sizeof(*si));
     int64_t at = 0;
-    while (at + 2 <= len) {
+    while (at + 1 <= len) {
         int type = (p[at] >> 3) & 0xF;
+        int has_ext = (p[at] >> 2) & 1;
         int has_size = (p[at] >> 1) & 1;
-        int64_t body = at + 1;
+        int64_t body = at + 1 + has_ext;
         int64_t body_len = 0;
         if (has_size) {
             int64_t v = 0;
@@ -159,48 +160,47 @@ static int read_obu_seq_header(const uint8_t *p, int64_t len, SeqInfo *si) {
         } else {
             body_len = len - body;
         }
-        if (body + body_len > len) return 0;
+        if (body > len || body_len < 0 || body + body_len > len) return 0;
         if (type == 1) { // OBU_SEQUENCE_HEADER
             BitRd r;
             r.p = p + body;
             r.len = body_len;
             r.bit = 0;
-            if (!br_bit(&r)) return 0; // marker
             si->profile = (int)br_bits(&r, 3);
             br_bit(&r); // still_picture
-            int reduced = br_bit(&r);
+            if (!br_bit(&r)) return 0; // reduced_still_picture_header
             si->level = (int)br_bits(&r, 5);
-            if (!reduced) return 0;
-            br_bit(&r); // use_128x128_superblock
-            br_bit(&r); // enable_filter_intra
-            br_bit(&r); // enable_intra_edge_filter
+            int wb = (int)br_bits(&r, 4) + 1;
+            int hb = (int)br_bits(&r, 4) + 1;
+            br_bits(&r, wb); // max_frame_width_minus_1
+            br_bits(&r, hb); // max_frame_height_minus_1
+            br_bits(&r, 6);  // 128 sb, filter intra, edge filter, superres, cdef, restoration
             si->high_bitdepth = br_bit(&r);
-            if (si->profile == 0 && si->high_bitdepth) si->twelve_bit = br_bit(&r);
-            if (si->profile == 1) {
-                si->monochrome = 0;
-            } else {
-                si->monochrome = br_bit(&r);
-            }
-            int desc = br_bit(&r);
-            if (desc) {
+            if (si->profile == 2 && si->high_bitdepth) si->twelve_bit = br_bit(&r);
+            si->monochrome = si->profile == 1 ? 0 : br_bit(&r);
+            si->primaries = si->transfer = si->matrix = 2; // unspecified
+            if (br_bit(&r)) {
                 si->primaries = (int)br_bits(&r, 8);
                 si->transfer = (int)br_bits(&r, 8);
                 si->matrix = (int)br_bits(&r, 8);
+            }
+            if (si->monochrome) {
+                si->full_range = br_bit(&r);
+                si->sub_x = si->sub_y = 1;
+            } else if (si->primaries == 1 && si->transfer == 13 && si->matrix == 0) {
+                si->full_range = 1; // sRGB identity: no subsampling bits
             } else {
-                si->primaries = 2;
-                si->transfer = 2;
-                si->matrix = 2;
+                si->full_range = br_bit(&r);
+                if (si->profile == 0) si->sub_x = si->sub_y = 1;
+                else if (si->profile == 2) {
+                    if (si->high_bitdepth && si->twelve_bit) {
+                        si->sub_x = br_bit(&r);
+                        si->sub_y = si->sub_x ? br_bit(&r) : 0;
+                    } else si->sub_x = 1;
+                }
+                if (si->sub_x && si->sub_y) si->chr_pos = (int)br_bits(&r, 2);
             }
-            si->full_range = br_bit(&r);
-            if (si->monochrome || si->matrix == 0) {
-                si->sub_x = si->monochrome ? 1 : 0;
-                si->sub_y = si->monochrome ? 1 : 0;
-            } else if (si->profile == 0) {
-                si->sub_x = br_bit(&r);
-                si->sub_y = br_bit(&r);
-            }
-            if (si->sub_x && si->sub_y) si->chr_pos = (int)br_bits(&r, 2);
-            return 1;
+            return r.bit <= r.len * 8;
         }
         at = body + body_len;
     }
@@ -209,42 +209,38 @@ static int read_obu_seq_header(const uint8_t *p, int64_t len, SeqInfo *si) {
 
 // --- RGB to YUV ----------------------------------------------------------
 
-// rgb8_to_yuv fills the planes in the 601 full range form. subsampling is
-// 0 for 4:4:4 and 1 for 4:2:0.
+// rgb8_to_yuv fills the planes. subsampling 0 gives 4:4:4 in the identity
+// matrix form (Y=G, U=B, V=R), which loses nothing. subsampling 1 gives
+// 4:2:0 in the BT.601 full range form.
+static uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+
 static void rgb8_to_yuv(const uint8_t *px, int32_t w, int32_t h, int subsampling,
                         uint8_t *yuv[3], int64_t stride_y, int64_t stride_c) {
     for (int32_t y = 0; y < h; y++) {
-        uint8_t *yrow = yuv[0] + y * stride_y;
         for (int32_t x = 0; x < w; x++) {
             const uint8_t *q = px + ((int64_t)y * w + x) * 4;
-            int r = q[0], g = q[1], b = q[2];
-            yrow[x] = (uint8_t)((19595 * r + 38470 * g + 7471 * b + 32768) >> 16);
+            if (subsampling == 0) {
+                yuv[0][y * stride_y + x] = q[1];
+                yuv[1][y * stride_c + x] = q[2];
+                yuv[2][y * stride_c + x] = q[0];
+            } else {
+                yuv[0][y * stride_y + x] = clamp8((19595 * q[0] + 38470 * q[1] + 7471 * q[2] + 32768) >> 16);
+            }
         }
-        if (subsampling == 0) {
-            uint8_t *urow = yuv[1] + y * stride_c;
-            uint8_t *vrow = yuv[2] + y * stride_c;
-            for (int32_t x = 0; x < w; x++) {
-                const uint8_t *q = px + ((int64_t)y * w + x) * 4;
-                int r = q[0], g = q[1], b = q[2];
-                urow[x] = (uint8_t)(((b - g) * 101589 >> 16) + 128);
-                vrow[x] = (uint8_t)(((r - g) * 131473 >> 16) + 128);
-            }
-        } else if (y % 2 == 0) {
-            uint8_t *urow = yuv[1] + (y >> 1) * stride_c;
-            uint8_t *vrow = yuv[2] + (y >> 1) * stride_c;
-            for (int32_t x = 0; x < w; x += 2) {
-                int rs = 0, gs = 0, bs = 0, cnt = 0;
-                for (int dy = 0; dy < 2 && y + dy < h; dy++) {
-                    for (int dx = 0; dx < 2 && x + dx < w; dx++) {
-                        const uint8_t *q = px + ((int64_t)(y + dy) * w + x + dx) * 4;
-                        rs += q[0]; gs += q[1]; bs += q[2];
-                        cnt++;
-                    }
+        if (subsampling == 0 || y % 2 != 0) continue;
+        for (int32_t x = 0; x < w; x += 2) {
+            int rs = 0, gs = 0, bs = 0, cnt = 0;
+            for (int dy = 0; dy < 2 && y + dy < h; dy++) {
+                for (int dx = 0; dx < 2 && x + dx < w; dx++) {
+                    const uint8_t *q = px + ((int64_t)(y + dy) * w + x + dx) * 4;
+                    rs += q[0]; gs += q[1]; bs += q[2];
+                    cnt++;
                 }
-                rs /= cnt; gs /= cnt; bs /= cnt;
-                urow[x >> 1] = (uint8_t)(((bs - gs) * 101589 >> 16) + 128);
-                vrow[x >> 1] = (uint8_t)(((rs - gs) * 131473 >> 16) + 128);
             }
+            rs = (rs + cnt / 2) / cnt; gs = (gs + cnt / 2) / cnt; bs = (bs + cnt / 2) / cnt;
+            int yy = (19595 * rs + 38470 * gs + 7471 * bs + 32768) >> 16;
+            yuv[1][(y >> 1) * stride_c + (x >> 1)] = clamp8(((bs - yy) * 36984 + 32768 >> 16) + 128);
+            yuv[2][(y >> 1) * stride_c + (x >> 1)] = clamp8(((rs - yy) * 46747 + 32768 >> 16) + 128);
         }
     }
 }
@@ -277,6 +273,12 @@ static int encode_frame(int32_t w, int32_t h, const uint8_t *y, const uint8_t *u
     do {
         if (aom_codec_control(&codec, AOME_SET_CPUUSED, (unsigned int)speed) != AOM_CODEC_OK) break;
         if (aom_codec_control(&codec, AOME_SET_CQ_LEVEL, (unsigned int)cq) != AOM_CODEC_OK) break;
+        // The bitstream carries the same color description as the colr box:
+        // BT.709 primaries, sRGB transfer, identity (lossless) or BT.601.
+        if (aom_codec_control(&codec, AV1E_SET_COLOR_PRIMARIES, 1u) != AOM_CODEC_OK ||
+            aom_codec_control(&codec, AV1E_SET_TRANSFER_CHARACTERISTICS, 13u) != AOM_CODEC_OK ||
+            aom_codec_control(&codec, AV1E_SET_MATRIX_COEFFICIENTS, profile == 1 ? 0u : 6u) != AOM_CODEC_OK ||
+            aom_codec_control(&codec, AV1E_SET_COLOR_RANGE, 1u) != AOM_CODEC_OK) break;
         if (lossless && aom_codec_control(&codec, AV1E_SET_LOSSLESS, 1u) != AOM_CODEC_OK) break;
         aom_image_t img;
         aom_img_fmt_t fmt = profile == 1 ? AOM_IMG_FMT_I444 : AOM_IMG_FMT_I420;
@@ -293,24 +295,28 @@ static int encode_frame(int32_t w, int32_t h, const uint8_t *y, const uint8_t *u
                 memcpy(img.planes[2] + (int64_t)r * img.stride[1], v + r * sc, (size_t)cw);
             }
         }
-        if (aom_codec_encode(&codec, &img, 0, 1, AOM_EFLAG_FORCE_KF) != AOM_CODEC_OK) {
-            aom_img_free(&img);
-            break;
-        }
-        aom_img_free(&img);
-        if (aom_codec_encode(&codec, NULL, 0, 1, 0) != AOM_CODEC_OK) break;
-        aom_codec_iter_t iter = NULL;
-        const aom_codec_cx_pkt_t *pkt;
-        int got = 0;
-        while ((pkt = aom_codec_get_cx_data(&codec, &iter)) != NULL) {
-            if (pkt->kind == AOM_CODEC_CX_FRAME_PKT && pkt->data.frame.sz > 0) {
-                if (!buf_push(out, pkt->data.frame.buf, (int64_t)pkt->data.frame.sz)) {
-                    got = 0;
-                    break;
+        // Drain the packets after every encode call: libaom drops the
+        // queued output when the next call starts.
+        int got = 0, bad = 0;
+        for (int pass = 0; pass < 2 && !bad; pass++) {
+            aom_codec_err_t e = pass == 0
+                ? aom_codec_encode(&codec, &img, 0, 1, AOM_EFLAG_FORCE_KF)
+                : aom_codec_encode(&codec, NULL, 0, 1, 0);
+            if (e != AOM_CODEC_OK) { bad = 1; break; }
+            aom_codec_iter_t iter = NULL;
+            const aom_codec_cx_pkt_t *pkt;
+            while ((pkt = aom_codec_get_cx_data(&codec, &iter)) != NULL) {
+                if (pkt->kind == AOM_CODEC_CX_FRAME_PKT && pkt->data.frame.sz > 0) {
+                    if (!buf_push(out, pkt->data.frame.buf, (int64_t)pkt->data.frame.sz)) {
+                        bad = 1;
+                        break;
+                    }
+                    got = 1;
                 }
-                got = 1;
             }
         }
+        aom_img_free(&img);
+        if (bad) break;
         ok = got && out->len > 0;
     } while (0);
     aom_codec_destroy(&codec);
@@ -322,7 +328,7 @@ static int encode_frame(int32_t w, int32_t h, const uint8_t *y, const uint8_t *u
 static void av1c_bytes(const SeqInfo *si, uint8_t out[4]) {
     out[0] = 0x81; // marker and version
     out[1] = (uint8_t)((si->profile << 5) | (si->level & 0x1F));
-    out[2] = (uint8_t)(((si->profile >= 1 || si->high_bitdepth) ? 0x40 : 0) |
+    out[2] = (uint8_t)((si->high_bitdepth ? 0x40 : 0) |
                        ((si->high_bitdepth && si->twelve_bit) ? 0x20 : 0) |
                        (si->monochrome ? 0x10 : 0) |
                        ((si->sub_x & 1) << 3) | ((si->sub_y & 1) << 2) |
@@ -363,8 +369,8 @@ static int box_colr(AvifBuf *b, int primaries, int transfer, int matrix, int ful
 static int box_auxc(AvifBuf *b) {
     BoxW w;
     if (!box_open(&w, b, "auxC") || !buf_u32(b, 0)) return 0;
-    const char *urn = "urn:mpeg:avif:aux:alpha";
-    if (!buf_push(b, urn, 23) || !buf_u8(b, 0)) return 0;
+    const char *urn = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
+    if (!buf_push(b, urn, strlen(urn)) || !buf_u8(b, 0)) return 0;
     return box_end(&w);
 }
 
@@ -393,7 +399,7 @@ static int write_avif(AvifBuf *out, const uint8_t *color_obus, int64_t color_len
     // hdlr
     if (ok) {
         BoxW wb;
-        ok = box_open(&wb, &meta, "hdlr") && buf_u32(&meta, 0) &&
+        ok = box_open(&wb, &meta, "hdlr") && buf_u32(&meta, 0) && buf_u32(&meta, 0) &&
              buf_type(&meta, "pict") && buf_u32(&meta, 0) && buf_u32(&meta, 0) &&
              buf_u32(&meta, 0) && buf_u8(&meta, 0) && box_end(&wb);
     }
@@ -430,19 +436,23 @@ static int write_avif(AvifBuf *out, const uint8_t *color_obus, int64_t color_len
         }
         if (ok) ok = box_end(&wb);
     }
+    // iref: the alpha item (2) is an auxiliary image of the color item (1)
+    if (ok && has_alpha) {
+        BoxW wr, wx;
+        ok = box_open(&wr, &meta, "iref") && buf_u32(&meta, 0) &&
+             box_open(&wx, &meta, "auxl") && buf_u16(&meta, 2) &&
+             buf_u16(&meta, 1) && buf_u16(&meta, 1) && box_end(&wx) && box_end(&wr);
+    }
     // iprp with ipco and ipma
     if (ok) {
         BoxW wp, wc, wa;
         ok = box_open(&wp, &meta, "iprp") && box_open(&wc, &meta, "ipco");
         if (ok) ok = box_av1c(&meta, &si) && box_ispe(&meta, w, h) &&
                      box_pixi(&meta, 3) && box_colr(&meta,
-                        si.primaries == 2 ? 1 : si.primaries,
-                        si.transfer == 2 ? 13 : si.transfer,
-                        si.matrix == 2 ? 6 : si.matrix, si.full_range);
+                        si.primaries, si.transfer, si.matrix, si.full_range);
         if (ok && has_alpha) {
             ok = box_av1c(&meta, &asi) && box_ispe(&meta, w, h) &&
-                 box_pixi(&meta, 1) && box_colr(&meta, 1, 13, 6, 1) &&
-                 box_auxc(&meta);
+                 box_pixi(&meta, 1) && box_auxc(&meta);
         }
         if (ok) ok = box_end(&wc);
         if (ok) {
@@ -452,9 +462,9 @@ static int write_avif(AvifBuf *out, const uint8_t *color_obus, int64_t color_len
                  buf_u8(&meta, 0x81) && buf_u8(&meta, 2) && buf_u8(&meta, 3) &&
                  buf_u8(&meta, 4);
             if (ok && has_alpha) {
-                ok = buf_u16(&meta, 2) && buf_u8(&meta, 5) &&
+                ok = buf_u16(&meta, 2) && buf_u8(&meta, 4) &&
                      buf_u8(&meta, 0x85) && buf_u8(&meta, 6) && buf_u8(&meta, 7) &&
-                     buf_u8(&meta, 8) && buf_u8(&meta, 0x89);
+                     buf_u8(&meta, 0x88);
             }
             if (ok) ok = box_end(&wa);
         }
@@ -468,7 +478,7 @@ static int write_avif(AvifBuf *out, const uint8_t *color_obus, int64_t color_len
     int64_t meta_len = meta.len;
     // Patch the iloc offsets. mdat starts after ftyp and meta.
     int64_t mdat_data = out->len + meta_len + 8;
-    int64_t at = iloc_at + 8 + 4 + 2 + 2 + 2 + 2; // first offset field
+    int64_t at = iloc_at + 8 + 4 + 2 + 2 + 2 + 2 + 2; // offset of the first extent
     meta.len = at;
     ok = buf_u32(&meta, (uint32_t)mdat_data) && buf_u32(&meta, (uint32_t)color_len);
     if (ok && has_alpha) {
@@ -526,7 +536,7 @@ int avif_encode(const uint8_t *pixels, int32_t w, int32_t h, int32_t quality,
         return 0;
     }
     rgb8_to_yuv(pixels, w, h, profile == 1 ? 0 : 1, yuv, sy, sc);
-    int cq = lossless ? 0 : (int)((100.0 - quality) * 2.55 + 0.5);
+    int cq = lossless ? 0 : (int)((100.0 - quality) * 0.63 + 0.5); // AV1 cq_level runs 0..63
     AvifBuf color;
     memset(&color, 0, sizeof(color));
     int ok = encode_frame(w, h, yuv[0], yuv[1], yuv[2], sy, sc, profile, 0,

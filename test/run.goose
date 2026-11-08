@@ -11,6 +11,7 @@ import gif_cases;
 import jpeg_cases;
 import webp_cases;
 import avif_cases;
+import avif_enc_cases;
 import png16_cases;
 import tiff_cases;
 
@@ -1073,6 +1074,7 @@ fn main() {
     jpeg_cases::check_jpeg_hostile();
     test_webp();
     avif_cases::check_avif();
+    avif_enc_cases::check_avif_enc();
     test_png16();
     test_tiff();
     print("all tests passed");
