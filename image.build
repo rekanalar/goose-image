@@ -1,7 +1,7 @@
 // The C part of the package. The stb headers and libwebp are vendored, so the
 // package needs no system library. libwebp 1.5.0 builds single threaded. dav1d 1.5.1 builds in plain C with
 // no assembly (config.h) and runs with one thread.
-c_sources = ["src/image.c", "src/gif.c", "src/jpeg.c", "src/tiff.c", "src/webp.c", "src/avif.c",
+c_sources = ["src/image.c", "src/gif.c", "src/jpeg.c", "src/tiff.c", "src/webp.c",
     "vendor/libwebp/sharpyuv/sharpyuv.c",
     "vendor/libwebp/sharpyuv/sharpyuv_cpu.c",
     "vendor/libwebp/sharpyuv/sharpyuv_csp.c",
