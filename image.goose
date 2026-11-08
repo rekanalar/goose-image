@@ -1,7 +1,7 @@
 // image - image decoding and encoding for Goose.
 //
-// The package reads PNG, JPEG, BMP, GIF, TGA, PSD, HDR, PNM and PIC. It
-// writes PNG, JPEG, BMP, TGA and HDR, to a file or to memory, and it
+// The package reads PNG, JPEG, BMP, GIF, TGA, PSD, HDR, PNM, PIC and WebP. It
+// writes PNG, JPEG, BMP, TGA, HDR and WebP, to a file or to memory, and it
 // resizes with several filters. The pixels are RGBA, four bytes each.
 //
 // The C part of the package wraps stb_image, stb_image_write and
@@ -30,6 +30,7 @@ extern fn img_probe_path(path: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i3
 extern fn img_probe(data: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -> bool;
 extern fn img_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, format: i32, param: i32) -> bool;
 extern fn img_jpeg(pixels: const u8[:], out: u8[>..]&, opts: const i32[:]) -> bool;
+extern fn img_encode_webp(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, quality: i32, lossless: i32) -> bool;
 extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
 extern fn img_meta(data: const u8[:], icc: u8[>..]&, exif: u8[>..]&) -> bool;
 extern fn img_meta_encode(base: const u8[:], out: u8[>..]&, icc: const u8[:], exif: const u8[:]) -> bool;
@@ -40,6 +41,7 @@ const FORMAT_JPEG = 1;
 const FORMAT_BMP = 2;
 const FORMAT_TGA = 3;
 const FORMAT_HDR = 4;
+const FORMAT_WEBP = 5;
 
 // The kinds of file that metadata names. KIND_UNKNOWN is not a format.
 const KIND_UNKNOWN = 0;
@@ -52,6 +54,7 @@ const KIND_PSD = 6;
 const KIND_HDR = 7;
 const KIND_PNM = 8;
 const KIND_PIC = 9;
+const KIND_WEBP = 10;
 
 // The filters of resize. FILTER_DEFAULT is Mitchell down and Catmull-Rom up.
 const FILTER_DEFAULT = 0;
@@ -153,12 +156,19 @@ fn info(path: const u8[:]) -> i32, i32, bool {
 }
 
 // encode gives the image as bytes in memory. The param is the JPEG quality
-// (1 to 100, default 90), the PNG level (1 to 9, default 8) or the TGA
-// run-length flag (1 on, 2 off, default on). The other formats ignore it.
-// The result is empty when the encode fails.
+// (1 to 100, default 90), the lossy WebP quality (1 to 100, default 80), the
+// PNG level (1 to 9, default 8) or the TGA run-length flag (1 on, 2 off,
+// default on). The other formats ignore it. The result is empty when the
+// encode fails.
 fn encode(img: Image&, format: i32, param: i32) -> u8[] {
     var out: u8[>..] = [];
     if !size_ok(img.width, img.height) { return []; }
+    if format == FORMAT_WEBP {
+        if !img_encode_webp(img.pixels, out, img.width, img.height, if param > 0 { param } else { 80 }, 0) {
+            return [];
+        }
+        return out[..];
+    }
     if !img_encode(img.pixels, out, img.width, img.height, format, param) {
         return [];
     }
@@ -191,6 +201,18 @@ fn encode_jpeg(img: Image&, quality: i32, progressive: bool, subsampling: i32) -
         var full: u8[>..] = [];
         if !img_meta_encode(out[..], full, img.icc, img.exif) { return out[..]; }
         return full[..];
+    }
+    return out[..];
+}
+
+// encode_webp gives the image as WebP bytes. The quality runs from 0 to 100.
+// A lossless write keeps every pixel and ignores the quality for the pixels.
+// A side above 16383 gives an empty result. WebP holds no ICC or EXIF here.
+fn encode_webp(img: Image&, quality: i32, lossless: bool) -> u8[] {
+    var out: u8[>..] = [];
+    if !size_ok(img.width, img.height) { return []; }
+    if !img_encode_webp(img.pixels, out, img.width, img.height, quality, if lossless { 1 } else { 0 }) {
+        return [];
     }
     return out[..];
 }

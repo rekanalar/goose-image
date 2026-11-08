@@ -1,0 +1,5 @@
+libwebp 1.5.0
+https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.5.0.tar.gz
+License: BSD 3-clause (COPYING), with the patent grant in PATENTS.
+Vendored: the decoder, the encoder, dsp, utils, sharpyuv. Not vendored:
+demux, mux, examples, MIPS and MSA code. The files are unchanged.

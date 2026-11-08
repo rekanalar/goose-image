@@ -19,6 +19,19 @@
 typedef struct { const uint8_t *data; int64_t len; } img_slice;
 #endif
 
+// The WebP part sits in webp.c. That file does not include goose.h, so the
+// types of the library and the types of the compiler stay apart. The
+// buffers that it gives back are freed with free().
+int webp_probe(const uint8_t *bytes, int64_t size, int32_t *w, int32_t *h, int32_t *ch);
+int webp_decode(const uint8_t *bytes, int64_t size, uint8_t **out, int64_t *out_len,
+                int32_t *w, int32_t *h);
+int webp_encode(const uint8_t *pixels, int32_t w, int32_t h, int32_t quality,
+                int32_t lossless, uint8_t **out, int64_t *out_len);
+void webp_free(void *p);
+static int is_webp(const uint8_t *b, int64_t n) {
+    return n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WEBP", 4);
+}
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "vendor/stb_image.h"
 
@@ -59,6 +72,14 @@ typedef struct { const int32_t *data; int64_t len; } img_islice;
 static uint8_t decode_core(const uint8_t *bytes, int64_t size, gs_rref out,
                            int32_t *w, int32_t *h) {
     if (size <= 0 || size > 0x7fffffff) return 0;
+    if (is_webp(bytes, size)) {
+        uint8_t *px = NULL;
+        int64_t len = 0;
+        if (!webp_decode(bytes, size, &px, &len, w, h)) return 0;
+        gs_bld_append(out, px, len);
+        webp_free(px);
+        return 1;
+    }
     int width = 0, height = 0, channels = 0;
     stbi_uc *pixels = stbi_load_from_memory(bytes, (int)size, &width, &height, &channels, 4);
     if (!pixels) return 0;
@@ -90,6 +111,7 @@ static int32_t sniff(const uint8_t *b, int64_t n) {
     if (n >= 2 && b[0] == 0xFF && b[1] == 0xD8) return 2;
     if (n >= 2 && !memcmp(b, "BM", 2)) return 3;
     if (n >= 4 && !memcmp(b, "GIF8", 4)) return 4;
+    if (is_webp(b, n)) return 10;
     if (n >= 4 && !memcmp(b, "8BPS", 4)) return 6;
     if ((n >= 10 && !memcmp(b, "#?RADIANCE", 10)) || (n >= 6 && !memcmp(b, "#?RGBE", 6))) return 7;
     if (n >= 3 && b[0] == 'P' && b[1] >= '1' && b[1] <= '6' &&
@@ -102,6 +124,11 @@ static int32_t sniff(const uint8_t *b, int64_t n) {
 static uint8_t probe_core(const uint8_t *bytes, int64_t size, int32_t *w, int32_t *h,
                           int32_t *ch, int32_t *kind) {
     if (size <= 0 || size > 0x7fffffff) return 0;
+    if (is_webp(bytes, size)) {
+        if (!webp_probe(bytes, size, w, h, ch)) return 0;
+        *kind = 10;
+        return 1;
+    }
     int width = 0, height = 0, channels = 0;
     if (!stbi_info_from_memory(bytes, (int)size, &width, &height, &channels)) return 0;
     *w = width;
@@ -469,4 +496,18 @@ uint8_t img_meta_encode(img_slice base, gs_rref out, img_slice icc,
         return 1;
     }
     return 0;
+}
+
+// img_encode_webp encodes RGBA pixels into out. The quality runs from 0 to
+// 100. A lossless write keeps every pixel, also under a clear alpha.
+uint8_t img_encode_webp(img_slice pixels, gs_rref out, int32_t w, int32_t h, int32_t quality, int32_t lossless) {
+    if (w <= 0 || h <= 0 || pixels.len < (int64_t)w * h * 4) return 0;
+    uint8_t *bytes = NULL;
+    int64_t len = 0;
+    if (!webp_encode(pixels.data, w, h, quality, lossless, &bytes, &len)) return 0;
+    if (bytes) {
+        gs_bld_append(out, bytes, len);
+        free(bytes);
+    }
+    return bytes != NULL;
 }
