@@ -272,6 +272,16 @@ domain. The third is public domain or MIT. The package reads the image
 files itself, so a path holds bytes with a length, as every Goose path
 does.
 
+Three codecs are vendored with their own license files:
+
+- libwebp 1.5.0 in `vendor/libwebp`. BSD 3-clause.
+- dav1d 1.5.1 in `vendor/dav1d`. BSD 2-clause.
+- libaom 3.12.1 in `vendor/aom`. BSD 2-clause, with the AOMedia Patent
+  License 1.0 in `vendor/aom/PATENTS`.
+
+Each codec builds as plain C. No SIMD code and no thread starts. The
+JPEG, GIF and TIFF codecs are the code of this package.
+
 ## Test
 
 ```bash
@@ -287,3 +297,4 @@ goose run examples/avif.goose
 ## License
 
 MIT. The stb headers are public domain, and stb_image_resize2 is also MIT.
+The vendored codecs keep their own licenses. See the section "The C part".
