@@ -45,6 +45,13 @@ static int is_tiff(const uint8_t *b, int64_t n) {
     // The head of a TIFF holds the order of the bytes and the number 42.
     return n >= 4 && (!memcmp(b, "II\x2a\x00", 4) || !memcmp(b, "MM\x00\x2a", 4));
 }
+// The AVIF decoder sits in avif.c, apart from goose.h for the same reason.
+int avif_sniff(const uint8_t *bytes, int64_t size);
+int avif_probe(const uint8_t *bytes, int64_t size, int32_t *w, int32_t *h, int32_t *ch);
+int avif_decode(const uint8_t *bytes, int64_t size, uint8_t **out, int64_t *out_len,
+                int32_t *w, int32_t *h);
+int avif_decode16(const uint8_t *bytes, int64_t size, uint8_t **out, int64_t *out_len,
+                  int32_t *w, int32_t *h);
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "vendor/stb_image.h"
@@ -102,6 +109,14 @@ static uint8_t decode_core(const uint8_t *bytes, int64_t size, gs_rref out,
         free(px);
         return 1;
     }
+    if (avif_sniff(bytes, size)) {
+        uint8_t *px = NULL;
+        int64_t len = 0;
+        if (!avif_decode(bytes, size, &px, &len, w, h)) return 0;
+        gs_bld_append(out, px, len);
+        free(px);
+        return 1;
+    }
     int width = 0, height = 0, channels = 0;
     stbi_uc *pixels = stbi_load_from_memory(bytes, (int)size, &width, &height, &channels, 4);
     if (!pixels) return 0;
@@ -118,6 +133,14 @@ static uint8_t decode_core(const uint8_t *bytes, int64_t size, gs_rref out,
 static uint8_t decode16_core(const uint8_t *bytes, int64_t size, gs_rref out,
                              int32_t *w, int32_t *h) {
     if (size <= 0 || size > 0x7fffffff || is_webp(bytes, size)) return 0;
+    if (avif_sniff(bytes, size)) {
+        uint8_t *px = NULL;
+        int64_t len = 0;
+        if (!avif_decode16(bytes, size, &px, &len, w, h)) return 0;
+        gs_bld_append(out, px, len);
+        free(px);
+        return 1;
+    }
     int width = 0, height = 0, channels = 0;
     stbi_us *pixels = stbi_load_16_from_memory(bytes, (int)size, &width, &height, &channels, 4);
     if (!pixels) return 0;
@@ -170,6 +193,7 @@ static int32_t sniff(const uint8_t *b, int64_t n) {
     if (n >= 4 && !memcmp(b, "GIF8", 4)) return 4;
     if (is_webp(b, n)) return 10;
     if (is_tiff(b, n)) return 11;
+    if (avif_sniff(b, n)) return 12;
     if (n >= 4 && !memcmp(b, "8BPS", 4)) return 6;
     if ((n >= 10 && !memcmp(b, "#?RADIANCE", 10)) || (n >= 6 && !memcmp(b, "#?RGBE", 6))) return 7;
     if (n >= 3 && b[0] == 'P' && b[1] >= '1' && b[1] <= '6' &&
@@ -190,6 +214,11 @@ static uint8_t probe_core(const uint8_t *bytes, int64_t size, int32_t *w, int32_
     if (is_tiff(bytes, size)) {
         if (!tiff_probe(bytes, size, w, h, ch)) return 0;
         *kind = 11;
+        return 1;
+    }
+    if (avif_sniff(bytes, size)) {
+        if (!avif_probe(bytes, size, w, h, ch)) return 0;
+        *kind = 12;
         return 1;
     }
     int width = 0, height = 0, channels = 0;
