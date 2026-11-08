@@ -16,3 +16,5 @@
 /test-image.webp
 /gradient.webp
 /test/run
+/test-image*.tif
+/gradient.tif
