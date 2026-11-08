@@ -3,8 +3,11 @@ name: ci
 on:
   push:
     branches: [main]
+    # A push that touches only the documents or this file runs no
+    # matrix. The next push that changes the code runs it.
     paths-ignore:
       - '**/*.md'
+      - '.github/workflows/ci.yml'
   pull_request:
   workflow_dispatch:
 
