@@ -7,6 +7,7 @@ import std;
 import os;
 import image from "..";
 import geometry_cases;
+import jpeg_cases;
 
 fn test_round_trip() {
     // A 4x3 image: every pixel holds the color of its place.
@@ -501,6 +502,8 @@ fn main() {
     test_resize();
     test_geometry();
     test_hostile_size();
+    jpeg_cases::check_jpeg();
+    jpeg_cases::check_jpeg_hostile();
     print("all tests passed");
     return 0;
 }

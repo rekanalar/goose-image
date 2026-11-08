@@ -1,4 +1,4 @@
 // The C part of the package. The stb headers are vendored, so the package
 // needs no system library.
-c_sources = ["src/image.c"];
+c_sources = ["src/image.c", "src/jpeg.c"];
 c_include = ["."];
