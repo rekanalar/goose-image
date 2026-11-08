@@ -10,12 +10,22 @@
 #define TRIM_DSP_FUNCTIONS 0
 
 #define HAVE_ASM 0
+#define HAVE_DLSYM 0
+#ifdef _WIN32
+// Windows takes _aligned_malloc from mem.h and the Win32 thread shim.
+#define _WIN32_WINNT 0x0601
+#define HAVE_ALIGNED_ALLOC 0
+#define HAVE_MEMALIGN 0
+#define HAVE_POSIX_MEMALIGN 0
+#define HAVE_UNISTD_H 0
+#define HAVE_CLOCK_GETTIME 0
+#else
 #define HAVE_ALIGNED_ALLOC 1
-#define HAVE_MEMALIGN 1
+#define HAVE_MEMALIGN 0
 #define HAVE_POSIX_MEMALIGN 1
 #define HAVE_UNISTD_H 1
-#define HAVE_DLSYM 0
 #define HAVE_CLOCK_GETTIME 1
+#endif
 
 #define HAVE_GETAUXVAL 0
 #define HAVE_ELF_AUX_INFO 0

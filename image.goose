@@ -1,6 +1,6 @@
 // image - image decoding and encoding for Goose.
 //
-// The package reads PNG, JPEG, BMP, GIF, TGA, PSD, HDR, PNM, PIC and WebP. It
+// The package reads PNG, JPEG, BMP, GIF, TGA, PSD, HDR, PNM, PIC, WebP and AVIF. It
 // writes PNG, JPEG, BMP, TGA, HDR and WebP, to a file or to memory, and it
 // resizes with several filters. The pixels are RGBA, four bytes each.
 //
@@ -45,6 +45,7 @@ const FORMAT_BMP = 2;
 const FORMAT_TGA = 3;
 const FORMAT_HDR = 4;
 const FORMAT_WEBP = 5;
+const FORMAT_AVIF = 7;
 
 // The kinds of file that metadata names. KIND_UNKNOWN is not a format.
 const KIND_UNKNOWN = 0;
@@ -58,6 +59,7 @@ const KIND_HDR = 7;
 const KIND_PNM = 8;
 const KIND_PIC = 9;
 const KIND_WEBP = 10;
+const KIND_AVIF = 12;
 
 // The filters of resize. FILTER_DEFAULT is Mitchell down and Catmull-Rom up.
 const FILTER_DEFAULT = 0;
@@ -124,6 +126,28 @@ fn decode(data: const u8[:]) -> Image {
     var exif: u8[>..] = [];
     img_meta(data, icc, exif);
     return Image { width: w, height: h, pixels: pixels[..], icc: icc[..], exif: exif[..] };
+}
+
+// decode_avif reads an AVIF image from bytes. It gives an empty image when
+// the bytes are not a still AVIF file. The decoder is dav1d, so 8, 10 and
+// 12 bit files read. A color above 8 bits narrows to 8 bits here. An alpha
+// item reads when the file holds one. Grid, animation and ICC are not read.
+fn decode_avif(data: const u8[:]) -> Image {
+    if metadata_bytes(data).kind != KIND_AVIF { return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] }; }
+    return decode(data);
+}
+
+// load_avif is decode_avif for the file at the path.
+fn load_avif(path: const u8[:]) -> Image {
+    if metadata(path).kind != KIND_AVIF { return Image { width: 0, height: 0, pixels: [], icc: [], exif: [] }; }
+    return load(path);
+}
+
+// decode_avif16 reads an AVIF image with 16 bits for each part. A part of
+// 10 or 12 bits scales to the full range of 16 bits, and 8 bits widen by 257.
+fn decode_avif16(data: const u8[:]) -> Image16 {
+    if metadata_bytes(data).kind != KIND_AVIF { return empty_image16(); }
+    return decode16(data);
 }
 
 // metadata reads the header of the file at the path. It does not decode

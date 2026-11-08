@@ -1,5 +1,6 @@
 // The C part of the package. The stb headers and libwebp are vendored, so the
-// package needs no system library. libwebp 1.5.0 builds single threaded.
+// package needs no system library. libwebp 1.5.0 builds single threaded. dav1d 1.5.1 builds in plain C with
+// no assembly (config.h) and runs with one thread.
 c_sources = ["src/image.c", "src/gif.c", "src/jpeg.c", "src/webp.c",
     "vendor/libwebp/sharpyuv/sharpyuv.c",
     "vendor/libwebp/sharpyuv/sharpyuv_cpu.c",
@@ -94,8 +95,62 @@ c_sources = ["src/image.c", "src/gif.c", "src/jpeg.c", "src/webp.c",
     "vendor/libwebp/src/utils/random_utils.c",
     "vendor/libwebp/src/utils/rescaler_utils.c",
     "vendor/libwebp/src/utils/thread_utils.c",
-    "vendor/libwebp/src/utils/utils.c"];
-c_include = [".", "vendor/libwebp"];
+    "vendor/libwebp/src/utils/utils.c",
+    "src/avif.c",
+    "vendor/dav1d/src/cdf.c",
+    "vendor/dav1d/dav1d_cpu.c",
+    "vendor/dav1d/src/ctx.c",
+    "vendor/dav1d/src/data.c",
+    "vendor/dav1d/src/decode.c",
+    "vendor/dav1d/src/dequant_tables.c",
+    "vendor/dav1d/src/getbits.c",
+    "vendor/dav1d/src/intra_edge.c",
+    "vendor/dav1d/src/itx_1d.c",
+    "vendor/dav1d/src/lf_mask.c",
+    "vendor/dav1d/src/lib.c",
+    "vendor/dav1d/src/log.c",
+    "vendor/dav1d/src/mem.c",
+    "vendor/dav1d/src/msac.c",
+    "vendor/dav1d/src/obu.c",
+    "vendor/dav1d/src/pal.c",
+    "vendor/dav1d/src/picture.c",
+    "vendor/dav1d/src/qm.c",
+    "vendor/dav1d/src/ref.c",
+    "vendor/dav1d/src/refmvs.c",
+    "vendor/dav1d/src/scan.c",
+    "vendor/dav1d/src/tables.c",
+    "vendor/dav1d/src/thread_task.c",
+    "vendor/dav1d/src/warpmv.c",
+    "vendor/dav1d/src/wedge.c",
+    "vendor/dav1d/gen/cdef_apply_tmpl_b16.c",
+    "vendor/dav1d/gen/cdef_apply_tmpl_b8.c",
+    "vendor/dav1d/gen/cdef_tmpl_b16.c",
+    "vendor/dav1d/gen/cdef_tmpl_b8.c",
+    "vendor/dav1d/gen/fg_apply_tmpl_b16.c",
+    "vendor/dav1d/gen/fg_apply_tmpl_b8.c",
+    "vendor/dav1d/gen/filmgrain_tmpl_b16.c",
+    "vendor/dav1d/gen/filmgrain_tmpl_b8.c",
+    "vendor/dav1d/gen/ipred_prepare_tmpl_b16.c",
+    "vendor/dav1d/gen/ipred_prepare_tmpl_b8.c",
+    "vendor/dav1d/gen/ipred_tmpl_b16.c",
+    "vendor/dav1d/gen/ipred_tmpl_b8.c",
+    "vendor/dav1d/gen/itx_tmpl_b16.c",
+    "vendor/dav1d/gen/itx_tmpl_b8.c",
+    "vendor/dav1d/gen/lf_apply_tmpl_b16.c",
+    "vendor/dav1d/gen/lf_apply_tmpl_b8.c",
+    "vendor/dav1d/gen/loopfilter_tmpl_b16.c",
+    "vendor/dav1d/gen/loopfilter_tmpl_b8.c",
+    "vendor/dav1d/gen/looprestoration_tmpl_b16.c",
+    "vendor/dav1d/gen/looprestoration_tmpl_b8.c",
+    "vendor/dav1d/gen/lr_apply_tmpl_b16.c",
+    "vendor/dav1d/gen/lr_apply_tmpl_b8.c",
+    "vendor/dav1d/gen/mc_tmpl_b16.c",
+    "vendor/dav1d/gen/mc_tmpl_b8.c",
+    "vendor/dav1d/gen/recon_tmpl_b16.c",
+    "vendor/dav1d/gen/recon_tmpl_b8.c"];
+// dav1d on Windows needs its thread shim, even with one thread.
+c_sources_windows = ["vendor/dav1d/src/win32/thread.c"];
+c_include = [".", "vendor/libwebp", "vendor/dav1d", "vendor/dav1d/include"];
 // The math library of the system. Windows holds it in the runtime.
-c_libs_linux = ["m"];
+c_libs_linux = ["m", "pthread"];
 
