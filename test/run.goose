@@ -11,6 +11,7 @@ import gif_cases;
 import jpeg_cases;
 import webp_cases;
 import png16_cases;
+import tiff_cases;
 
 fn test_round_trip() {
     // A 4x3 image: every pixel holds the color of its place.
@@ -931,6 +932,124 @@ fn test_png16() {
     print("png16 cases ok\n");
 }
 
+// noisy makes an image of bytes that a coder cannot shrink much. It has so
+// many different strings that LZW fills its table and clears it.
+fn noisy(w: i32, h: i32) -> image::Image {
+    var px: u8[>..] = [];
+    var s: u32 = 12345;
+    for i in 0..(w * h) {
+        s = s * 1664525 + 1013904223;
+        px.push(((s >> 24) & 255) as u8);
+        px.push(((s >> 16) & 255) as u8);
+        px.push(((s >> 8) & 255) as u8);
+        px.push(if i % 3 == 0 { 255 } else { ((s >> 20) & 255) as u8 });
+    }
+    return image::Image { width: w, height: h, pixels: px[..], icc: [], exif: [] };
+}
+
+// test_tiff checks the codec: the files of Pillow, the files that the script
+// built, the writer of the package and the hostile bytes.
+fn test_tiff() {
+    tiff_cases::check_decode();
+    tiff_cases::check_pages();
+    tiff_cases::check_hostile();
+
+    // The constants. The old numbers keep their values.
+    assert(image::FORMAT_TIFF == 6 && image::KIND_TIFF == 11);
+    assert(image::FORMAT_WEBP == 5 && image::KIND_WEBP == 10);
+
+    // Every compression keeps every pixel, also under a clear alpha.
+    var img = make_busy();
+    image::set_pixel(img, 3, 3, 12, 34, 56, 0);
+    image::set_pixel(img, 4, 3, 99, 98, 97, 77);
+    let comps: i32[3] = [image::TIFF_COMPRESSION_NONE, image::TIFF_COMPRESSION_LZW, image::TIFF_COMPRESSION_DEFLATE];
+    for c in comps {
+        let bytes = image::encode_tiff(img, c);
+        assert(bytes.len > 8 && bytes[0] == 'I' && bytes[1] == 'I' && bytes[2] == 42 && bytes[3] == 0);
+        let back = image::decode(bytes);
+        assert(back.width == 32 && back.height == 32 && back.pixels == img.pixels);
+        assert(image::decode_tiff_pages(bytes) == 1);
+        let m = image::metadata_bytes(bytes);
+        assert(m.ok && m.kind == image::KIND_TIFF && m.width == 32 && m.height == 32 && m.channels == 4);
+        // The same bytes come out of a second write.
+        assert(image::encode_tiff(img, c) == bytes);
+    }
+
+    // A big noisy image fills the table of LZW and the window of Deflate.
+    let nz = noisy(150, 130);
+    for c in comps {
+        let back = image::decode(image::encode_tiff(nz, c));
+        assert(back.width == 150 && back.height == 130 && back.pixels == nz.pixels);
+    }
+    // A flat image shrinks under LZW and Deflate.
+    let flat = image::new_image(64, 64, 9, 9, 9, 255);
+    let raw_len = image::encode_tiff(flat, image::TIFF_COMPRESSION_NONE).len;
+    assert(image::encode_tiff(flat, image::TIFF_COMPRESSION_LZW).len < raw_len / 4);
+    assert(image::encode_tiff(flat, image::TIFF_COMPRESSION_DEFLATE).len < raw_len / 4);
+    // One pixel.
+    let one = image::new_image(1, 1, 1, 2, 3, 4);
+    for c in comps {
+        let ob = image::decode(image::encode_tiff(one, c));
+        assert(ob.width == 1 && ob.pixels == one.pixels);
+    }
+
+    // encode and write take the format. The param is the compression.
+    assert(image::encode(img, image::FORMAT_TIFF, 0) == image::encode_tiff(img, image::TIFF_COMPRESSION_NONE));
+    assert(image::encode(img, image::FORMAT_TIFF, 5) == image::encode_tiff(img, image::TIFF_COMPRESSION_LZW));
+    assert(image::encode(img, image::FORMAT_TIFF, 3).len == 0);
+    assert(image::encode_tiff(img, 3).len == 0);
+    assert(image::encode_tiff(img, -1).len == 0);
+
+    // The files that the Python check reads back with Pillow. They hold the
+    // plain image, without the clear pixels of the test above.
+    let plain = make_busy();
+    assert(image::write_tiff_with("test-image-none.tif", plain, image::TIFF_COMPRESSION_NONE));
+    assert(image::write_tiff_with("test-image-lzw.tif", plain, image::TIFF_COMPRESSION_LZW));
+    assert(image::write_tiff_with("test-image-deflate.tif", plain, image::TIFF_COMPRESSION_DEFLATE));
+    assert(image::write_tiff("test-image.tif", plain));
+    assert(!image::write_tiff_with("test-image-bad.tif", plain, 9));
+    let fl = image::load("test-image-lzw.tif");
+    assert(fl.width == 32 && fl.height == 32 && fl.pixels == plain.pixels);
+    let fm = image::metadata("test-image-deflate.tif");
+    assert(fm.ok && fm.kind == image::KIND_TIFF && fm.width == 32 && fm.height == 32);
+
+    // Bad input to the writer gives the empty result.
+    let none = image::Image { width: 4, height: 4, pixels: [], icc: [], exif: [] };
+    assert(image::encode_tiff(none, 1).len == 0);
+    assert(!image::write_tiff("test-image-none2.tif", none));
+    assert(image::decode_tiff_pages("not a tiff") == 0);
+    assert(image::decode_tiff_pages([]) == 0);
+    assert(image::decode("II*\x00").width == 0);
+    assert(!image::metadata_bytes("MM\x00*\x00\x00\x00\x08").ok);
+
+    // A cut file is a fault or the whole image. A cut that holds all of the
+    // bytes of the strip is the whole image.
+    for c in comps {
+        let good = image::encode_tiff(img, c);
+        for n in 0..good.len {
+            if n % 13 != 0 { continue; }
+            var cut: u8[>..] = [];
+            cut.append(good[..n]);
+            let ci = image::decode(cut[..]);
+            assert(ci.pixels.len == 0 || ci.pixels.len == 32 * 32 * 4);
+            image::metadata_bytes(cut[..]);
+            image::decode_tiff_pages(cut[..]);
+        }
+    }
+    // Every single flipped byte of the header and the directory ends fast.
+    let hdr = image::encode_tiff(one, image::TIFF_COMPRESSION_NONE);
+    for i in 0..hdr.len {
+        for v in [0, 1, 255] {
+            var bent: u8[>..] = [];
+            bent.append(hdr[..]);
+            bent[i] = v as u8;
+            let bi = image::decode(bent[..]);
+            assert(bi.pixels.len == bi.width * bi.height * 4);
+        }
+    }
+    print("tiff cases ok\n");
+}
+
 fn main() {
     meta_cases();
     test_round_trip();
@@ -953,6 +1072,7 @@ fn main() {
     jpeg_cases::check_jpeg_hostile();
     test_webp();
     test_png16();
+    test_tiff();
     print("all tests passed");
     return 0;
 }

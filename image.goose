@@ -31,6 +31,8 @@ extern fn img_probe(data: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -
 extern fn img_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, format: i32, param: i32) -> bool;
 extern fn img_jpeg(pixels: const u8[:], out: u8[>..]&, opts: const i32[:]) -> bool;
 extern fn img_encode_webp(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, quality: i32, lossless: i32) -> bool;
+extern fn img_tiff_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, compression: i32) -> bool;
+extern fn img_tiff_pages(data: const u8[:]) -> i32;
 extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
 extern fn img_decode16(data: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
 extern fn img_load16(path: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
@@ -45,6 +47,7 @@ const FORMAT_BMP = 2;
 const FORMAT_TGA = 3;
 const FORMAT_HDR = 4;
 const FORMAT_WEBP = 5;
+const FORMAT_TIFF = 6;
 
 // The kinds of file that metadata names. KIND_UNKNOWN is not a format.
 const KIND_UNKNOWN = 0;
@@ -58,6 +61,12 @@ const KIND_HDR = 7;
 const KIND_PNM = 8;
 const KIND_PIC = 9;
 const KIND_WEBP = 10;
+const KIND_TIFF = 11;
+
+// The compressions of TIFF that the writer of the package makes.
+const TIFF_COMPRESSION_NONE = 1;
+const TIFF_COMPRESSION_LZW = 5;
+const TIFF_COMPRESSION_DEFLATE = 8;
 
 // The filters of resize. FILTER_DEFAULT is Mitchell down and Catmull-Rom up.
 const FILTER_DEFAULT = 0;
@@ -160,14 +169,25 @@ fn info(path: const u8[:]) -> i32, i32, bool {
 
 // encode gives the image as bytes in memory. The param is the JPEG quality
 // (1 to 100, default 90), the lossy WebP quality (1 to 100, default 80), the
-// PNG level (1 to 9, default 8) or the TGA run-length flag (1 on, 2 off,
-// default on). The other formats ignore it. The result is empty when the
-// encode fails.
+// PNG level (1 to 9, default 8), the TGA run-length flag (1 on, 2 off,
+// default on) or the compression of TIFF (TIFF_COMPRESSION_NONE,
+// TIFF_COMPRESSION_LZW or TIFF_COMPRESSION_DEFLATE, default none). The other
+// formats ignore it. The result is empty when the encode fails.
 fn encode(img: Image&, format: i32, param: i32) -> u8[] {
     var out: u8[>..] = [];
     if !size_ok(img.width, img.height) { return []; }
     if format == FORMAT_WEBP {
         if !img_encode_webp(img.pixels, out, img.width, img.height, if param > 0 { param } else { 80 }, 0) {
+            return [];
+        }
+        return out[..];
+    }
+    if format == FORMAT_TIFF {
+        let comp = if param == 0 { TIFF_COMPRESSION_NONE } else { param };
+        if comp != TIFF_COMPRESSION_NONE && comp != TIFF_COMPRESSION_LZW && comp != TIFF_COMPRESSION_DEFLATE {
+            return [];
+        }
+        if !img_tiff_encode(img.pixels, out, img.width, img.height, comp) {
             return [];
         }
         return out[..];
@@ -268,6 +288,41 @@ fn write_png(path: const u8[:], img: Image&) -> bool {
 // write_jpeg writes the image to the path as a JPEG file.
 fn write_jpeg(path: const u8[:], img: Image&) -> bool {
     return write(path, img, FORMAT_JPEG);
+}
+
+// encode_tiff gives the image as a TIFF file in memory. The compression is
+// TIFF_COMPRESSION_NONE, TIFF_COMPRESSION_LZW or TIFF_COMPRESSION_DEFLATE.
+// The result is empty when the compression is outside its range.
+fn encode_tiff(img: Image&, compression: i32) -> u8[] {
+    if !size_ok(img.width, img.height) { return []; }
+    if compression != TIFF_COMPRESSION_NONE && compression != TIFF_COMPRESSION_LZW
+        && compression != TIFF_COMPRESSION_DEFLATE {
+        return [];
+    }
+    var out: u8[>..] = [];
+    if !img_tiff_encode(img.pixels, out, img.width, img.height, compression) { return []; }
+    return out[..];
+}
+
+// write_tiff writes the image to the path as a TIFF file. The file holds no
+// compression.
+fn write_tiff(path: const u8[:], img: Image&) -> bool {
+    return write_tiff_with(path, img, TIFF_COMPRESSION_NONE);
+}
+
+// write_tiff_with writes the image to the path as a TIFF file. The
+// compression is as for encode_tiff.
+fn write_tiff_with(path: const u8[:], img: Image&, compression: i32) -> bool {
+    if !size_ok(img.width, img.height) { return false; }
+    let out = encode_tiff(img, compression);
+    if out.len == 0 { return false; }
+    return write_file(path, out);
+}
+
+// decode_tiff_pages counts the pages of a TIFF file that sits in memory. It
+// gives 0 when the bytes are not a TIFF file.
+fn decode_tiff_pages(data: const u8[:]) -> i32 {
+    return img_tiff_pages(data);
 }
 
 // write_bmp writes the image to the path as a BMP file.
