@@ -292,6 +292,7 @@ goose run examples/geometry.goose
 goose run examples/webp.goose
 goose run examples/tiff.goose
 goose run examples/avif.goose
+goose run examples/metadata.goose
 ```
 
 ## License
