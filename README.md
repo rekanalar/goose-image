@@ -104,6 +104,26 @@ and on PNG. The check ran the round trip against Pillow 13.0.0.
   It does the same when the buffer would pass 2147483647 bytes. `resize`,
   `fit` and `encode` give the empty image or false in that case.
 - A path longer than 4095 bytes fails. A file over 2 GiB fails.
+- Every decoder holds the size of the picture it reads. The caps stand before any pixel is written. The PNG, JPEG, BMP, TGA, PSD, HDR, PNM and PIC decoders stop at 16777216 pixels. That limit comes from `stb_image`.
+- The TIFF decoder stops at 67108864 pixels. The AVIF decoder stops at 16777216 pixels. The WebP decoder stops at 16383 pixels for a side and at 268435456 bytes of pixels. The GIF decoder stops at 67108864 bytes of canvas. A file that claims more gives the empty image.
+- The EXIF reader reads at most 64 lists of tags. It reads at most 1048576 bytes for one value. A block that claims more gives an empty value.
+
+## Security
+
+An image file can come from a stranger. A small file can claim a large picture and make the program spend all its memory on it. Every decoder of this package holds the size of the picture. The caps above stand before any pixel is written.
+
+Python `Pillow` 12.3.0 has a different rule. Its `MAX_IMAGE_PIXELS` is 89478485. A file above that count gives a warning only. The author ran a PNG that claims 100000 by 1000 pixels: `Pillow` opened it with a `DecompressionBombWarning`. This package gives the empty image for the same file. The author ran both.
+
+The rule of `Pillow` refuses only above 178956970 pixels. The caps of this package are below that count on every path.
+
+The reader of the EXIF tags reads bytes of a stranger. It holds every read inside the block. It reads at most 64 lists and 1048576 bytes for one value. The author ran ten broken blocks against it. Each one breaks the block in another way. Every one gives an empty value. Nothing aborts.
+
+Risks that stay:
+
+- `stb_image` does not check the CRC of a PNG chunk. A changed byte in a PNG passes. The pixels then hold what the file says.
+- The decoders of `stb_image`, `libwebp`, `dav1d` and `libaom` are the code of their authors. They have their own limits. This package trusts them for the bytes inside a picture.
+- A decoded picture can take 268435456 bytes of memory. A program that decodes many pictures at once must hold them one by one.
+- The EXIF block of a file holds the bytes of a stranger. A program that writes them into a file of its own must know where they go.
 
 ## Install
 
