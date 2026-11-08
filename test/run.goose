@@ -475,6 +475,144 @@ fn test_gif_round_trip() {
     print("gif round trip ok\n");
 }
 
+// test_gif_quant writes a frame with more colors than the table of a GIF.
+// The writer cuts the colors, so the pixels come back close to the source.
+fn test_gif_quant() {
+    var px: u8[>..] = [];
+    for i in 0..(32 * 32) {
+        px.push((i % 256) as u8);
+        px.push((i / 4) as u8);
+        px.push((i * 3 % 256) as u8);
+        px.push(255);
+    }
+    let img = image::Image { width: 32, height: 32, pixels: px[..], icc: [], exif: [] };
+    var fs: image::GifFrame[>..] = [];
+    fs.push(frame(copy(img), 0, 0));
+    let g = image::Gif { frames: fs[..], width: 32, height: 32, loop_count: 0 };
+    let bytes = image::encode_gif(g);
+    assert(bytes.len > 0);
+    let back = image::decode_gif(bytes);
+    assert(back.frames.len == 1);
+    let fr = frame_at(back, 0);
+    let got = fr.image.pixels;
+    // The mean error of the colors, times 1000.
+    var sum: i64 = 0;
+    var i: i64 = 0;
+    while i < 32 * 32 {
+        for c in 0..3 {
+            var d = got[i * 4 + c] as i64 - px[i * 4 + c] as i64;
+            if d < 0 { d = -d; }
+            sum += d;
+        }
+        i += 1;
+    }
+    assert(sum * 1000 / (32 * 32 * 3) < 12000);
+    // The same image again gives the same file.
+    assert(image::encode_gif(g) == bytes);
+    print("gif quant ok\n");
+}
+
+// test_gif_clear writes a frame with a clear part. The clear pixels keep
+// their place and the other pixels keep their color.
+fn test_gif_clear() {
+    var px: u8[>..] = [];
+    for i in 0..(16 * 16) {
+        px.push(200); px.push(100); px.push(50); px.push(255);
+    }
+    for i in 0..(16 * 16) {
+        px.push(0); px.push(0); px.push(255); px.push(0);
+    }
+    let img = image::Image { width: 16, height: 32, pixels: px[..], icc: [], exif: [] };
+    var fs: image::GifFrame[>..] = [];
+    fs.push(frame(copy(img), 0, 0));
+    let g = image::Gif { frames: fs[..], width: 16, height: 32, loop_count: 0 };
+    let back = image::decode_gif(image::encode_gif(g));
+    assert(back.frames.len == 1);
+    let fr = frame_at(back, 0);
+    let got = fr.image.pixels;
+    // The first pixel keeps its color, the first pixel of the clear part is
+    // clear.
+    assert(got[0] == 200 && got[1] == 100 && got[2] == 50 && got[3] == 255);
+    assert(got[1024] == 0 && got[1027] == 0);
+    // A frame with more colors than the table and a clear part. The clear
+    // pixels keep their place and the other pixels stay near the source.
+    var many: u8[>..] = [];
+    for i in 0..(32 * 32) {
+        many.push((i % 256) as u8);
+        many.push((i / 4) as u8);
+        many.push((i * 5 % 256) as u8);
+        many.push(if i < 32 * 16 { 255 } else { 0 });
+    }
+    var fs2: image::GifFrame[>..] = [];
+    fs2.push(frame(image::Image { width: 32, height: 32, pixels: many[..], icc: [], exif: [] }, 0, 0));
+    let g2 = image::Gif { frames: fs2[..], width: 32, height: 32, loop_count: 0 };
+    let back2 = image::decode_gif(image::encode_gif(g2));
+    assert(back2.frames.len == 1);
+    let fr2 = frame_at(back2, 0);
+    let got2 = fr2.image.pixels;
+    assert(got2[3] == 255);
+    assert(got2[32 * 16 * 4 + 3] == 0);
+    print("gif clear ok\n");
+}
+
+// test_gif_offsets writes frames where only a part of the canvas changes.
+// The writer cuts the frame to the part that changed.
+fn test_gif_offsets() {
+    // The first frame holds one color. The second one holds a small square
+    // of another color.
+    var px: u8[>..] = [];
+    for i in 0..(32 * 32) {
+        px.push(10); px.push(20); px.push(30); px.push(255);
+    }
+    var sq: u8[>..] = [];
+    for i in 0..(32 * 32) {
+        let y = i / 32;
+        let x = i % 32;
+        if y >= 5 && y < 9 && x >= 6 && x < 10 {
+            sq.push(200); sq.push(10); sq.push(10); sq.push(255);
+        } else {
+            sq.push(10); sq.push(20); sq.push(30); sq.push(255);
+        }
+    }
+    var fs: image::GifFrame[>..] = [];
+    fs.push(frame(image::Image { width: 32, height: 32, pixels: px[..], icc: [], exif: [] }, 0, 0));
+    fs.push(frame(image::Image { width: 32, height: 32, pixels: sq[..], icc: [], exif: [] }, 0, 0));
+    let g = image::Gif { frames: fs[..], width: 32, height: 32, loop_count: 0 };
+    let bytes = image::encode_gif(g);
+    let back = image::decode_gif(bytes);
+    assert(back.frames.len == 2);
+    // The square of the second frame shows up.
+    let fr = frame_at(back, 1);
+    let got = fr.image.pixels;
+    let at = (6 * 32 + 7) * 4;
+    assert(got[at] == 200 && got[at + 1] == 10 && got[at + 2] == 10 && got[at + 3] == 255);
+    // The rest of the canvas keeps the color of the first frame.
+    let out = (0 * 32 + 0) * 4;
+    assert(got[out] == 10 && got[out + 1] == 20 && got[out + 2] == 30 && got[out + 3] == 255);
+    // A frame that changes the whole canvas needs more room than a frame
+    // that changes a small part of it.
+    var all: u8[>..] = [];
+    for i in 0..(32 * 32) {
+        all.push(90); all.push(80); all.push(70); all.push(255);
+    }
+    var fs2: image::GifFrame[>..] = [];
+    fs2.push(frame(image::Image { width: 32, height: 32, pixels: px[..], icc: [], exif: [] }, 0, 0));
+    fs2.push(frame(image::Image { width: 32, height: 32, pixels: all[..], icc: [], exif: [] }, 0, 0));
+    let g2 = image::Gif { frames: fs2[..], width: 32, height: 32, loop_count: 0 };
+    assert(image::encode_gif(g2).len > bytes.len);
+    // A frame that holds the same pixels as the frame before it keeps its
+    // place in the file.
+    var fs3: image::GifFrame[>..] = [];
+    fs3.push(frame(image::Image { width: 32, height: 32, pixels: px[..], icc: [], exif: [] }, 0, 0));
+    fs3.push(frame(image::Image { width: 32, height: 32, pixels: px[..], icc: [], exif: [] }, 0, 0));
+    let g3 = image::Gif { frames: fs3[..], width: 32, height: 32, loop_count: 0 };
+    let same = image::decode_gif(image::encode_gif(g3));
+    assert(same.frames.len == 2);
+    let sfr = frame_at(same, 1);
+    assert(sfr.image.pixels[0] == 10 && sfr.image.pixels[3] == 255);
+    print("gif offsets ok\n");
+}
+
 // test_gif_hostile feeds broken files. Nothing aborts and each one ends fast.
 fn test_gif_hostile() {
     var fs: image::GifFrame[>..] = [];
@@ -739,6 +877,9 @@ fn main() {
     test_geometry();
     test_hostile_size();
     test_gif_round_trip();
+    test_gif_quant();
+    test_gif_clear();
+    test_gif_offsets();
     test_gif_hostile();
     gif_cases::check_gif();
     jpeg_cases::check_jpeg();
