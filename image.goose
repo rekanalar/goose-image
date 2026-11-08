@@ -29,6 +29,7 @@ extern fn img_decode(data: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool
 extern fn img_probe_path(path: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -> bool;
 extern fn img_probe(data: const u8[:], w: i32&, h: i32&, ch: i32&, kind: i32&) -> bool;
 extern fn img_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, format: i32, param: i32) -> bool;
+extern fn img_jpeg(pixels: const u8[:], out: u8[>..]&, opts: const i32[:]) -> bool;
 extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
 extern fn img_meta(data: const u8[:], icc: u8[>..]&, exif: u8[>..]&) -> bool;
 extern fn img_meta_encode(base: const u8[:], out: u8[>..]&, icc: const u8[:], exif: const u8[:]) -> bool;
@@ -168,6 +169,38 @@ fn encode(img: Image&, format: i32, param: i32) -> u8[] {
         return full[..];
     }
     return out[..];
+}
+
+// The subsampling numbers of encode_jpeg are the numbers of Pillow.
+const SUBSAMPLING_444 = 0;
+const SUBSAMPLING_422 = 1;
+const SUBSAMPLING_420 = 2;
+
+// encode_jpeg gives the image as a JPEG in memory. The quality runs from 1
+// to 100 and 0 or below means 90. The progressive flag picks the progressive form.
+// The subsampling is SUBSAMPLING_444, SUBSAMPLING_422 or SUBSAMPLING_420.
+// The result is empty when the subsampling is outside its range. A quality
+// above 100 counts as 100. The alpha part is dropped. The metadata of the image rides along.
+fn encode_jpeg(img: Image&, quality: i32, progressive: bool, subsampling: i32) -> u8[] {
+    if !size_ok(img.width, img.height) { return []; }
+    if subsampling < 0 || subsampling > 2 { return []; }
+    var out: u8[>..] = [];
+    let opts: i32[5] = [img.width, img.height, if quality <= 0 { 90 } else if quality > 100 { 100 } else { quality }, if progressive { 1 } else { 0 }, subsampling];
+    if !img_jpeg(img.pixels, out, opts) { return []; }
+    if img.icc.len > 0 || img.exif.len > 0 {
+        var full: u8[>..] = [];
+        if !img_meta_encode(out[..], full, img.icc, img.exif) { return out[..]; }
+        return full[..];
+    }
+    return out[..];
+}
+
+// write_jpeg_with writes the image to the path as a JPEG file. The options
+// are as for encode_jpeg.
+fn write_jpeg_with(path: const u8[:], img: Image&, quality: i32, progressive: bool, subsampling: i32) -> bool {
+    let out = encode_jpeg(img, quality, progressive, subsampling);
+    if out.len == 0 { return false; }
+    return write_file(path, out);
 }
 
 // write_with writes the image to the path. The param is as for encode.

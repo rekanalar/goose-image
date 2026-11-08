@@ -8,6 +8,7 @@ import os;
 import image from "..";
 import geometry_cases;
 import gif_cases;
+import jpeg_cases;
 
 fn test_round_trip() {
     // A 4x3 image: every pixel holds the color of its place.
@@ -642,6 +643,8 @@ fn main() {
     test_gif_round_trip();
     test_gif_hostile();
     gif_cases::check_gif();
+    jpeg_cases::check_jpeg();
+    jpeg_cases::check_jpeg_hostile();
     print("all tests passed");
     return 0;
 }
