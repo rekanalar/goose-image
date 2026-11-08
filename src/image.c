@@ -25,6 +25,8 @@ typedef struct { const uint8_t *data; int64_t len; } img_slice;
 int webp_probe(const uint8_t *bytes, int64_t size, int32_t *w, int32_t *h, int32_t *ch);
 int webp_decode(const uint8_t *bytes, int64_t size, uint8_t **out, int64_t *out_len,
                 int32_t *w, int32_t *h);
+int avif_encode(const uint8_t *pixels, int32_t w, int32_t h, int32_t quality,
+                int32_t speed, uint8_t **out, int64_t *out_len);
 int webp_encode(const uint8_t *pixels, int32_t w, int32_t h, int32_t quality,
                 int32_t lossless, uint8_t **out, int64_t *out_len);
 void webp_free(void *p);
@@ -575,6 +577,20 @@ uint8_t img_encode_webp(img_slice pixels, gs_rref out, int32_t w, int32_t h, int
     uint8_t *bytes = NULL;
     int64_t len = 0;
     if (!webp_encode(pixels.data, w, h, quality, lossless, &bytes, &len)) return 0;
+    if (bytes) {
+        gs_bld_append(out, bytes, len);
+        free(bytes);
+    }
+    return bytes != NULL;
+}
+
+// img_encode_avif encodes RGBA pixels into out. The quality runs from 0 to
+// 100 and 100 is lossless. The speed runs from 0 to 9.
+uint8_t img_encode_avif(img_slice pixels, gs_rref out, int32_t w, int32_t h, int32_t quality, int32_t speed) {
+    if (w <= 0 || h <= 0 || pixels.len < (int64_t)w * h * 4) return 0;
+    uint8_t *bytes = NULL;
+    int64_t len = 0;
+    if (!avif_encode(pixels.data, w, h, quality, speed, &bytes, &len)) return 0;
     if (bytes) {
         gs_bld_append(out, bytes, len);
         free(bytes);

@@ -10,6 +10,7 @@ import geometry_cases;
 import gif_cases;
 import jpeg_cases;
 import webp_cases;
+import avif_enc_cases;
 import png16_cases;
 
 fn test_round_trip() {
@@ -811,6 +812,7 @@ fn main() {
     jpeg_cases::check_jpeg();
     jpeg_cases::check_jpeg_hostile();
     test_webp();
+    avif_enc_cases::check_avif_enc();
     test_png16();
     print("all tests passed");
     return 0;
