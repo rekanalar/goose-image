@@ -10,6 +10,7 @@ import geometry_cases;
 import gif_cases;
 import jpeg_cases;
 import webp_cases;
+import png16_cases;
 
 fn test_round_trip() {
     // A 4x3 image: every pixel holds the color of its place.
@@ -726,6 +727,72 @@ fn test_webp() {
     print("webp cases ok\n");
 }
 
+fn test_png16() {
+    png16_cases::check_read16();
+    png16_cases::check_exif_build();
+    png16_cases::check_turn();
+
+    // A round trip of 16 bits keeps every value, and the file is a PNG of depth 16.
+    var px: u16[>..] = [];
+    for i in 0..5 * 3 * 4 { px.push(((i * 4099 + 17) % 65536) as u16); }
+    let img = image::Image16 { width: 5, height: 3, pixels: px[..] };
+    let png = image::encode16(img);
+    assert(png.len > 33 && png[24] == 16 && png[25] == 6);
+    let back = image::decode16(png[..]);
+    assert(back.width == 5 && back.height == 3 && back.pixels == img.pixels);
+    assert(image::write16("test-image16.png", img));
+    assert(image::load16("test-image16.png").pixels == img.pixels);
+    // The 8-bit reader sees the high byte of a 16-bit file.
+    let low = image::decode(png[..]);
+    assert(low.width == 5 && low.pixels[0] == (img.pixels[0] >> 8) as u8);
+
+    // The conversions: widen by 257, narrow with rounding, and a round trip.
+    let e8 = image::new_image(2, 1, 0, 128, 255, 7);
+    let e16 = image::to_image16(e8);
+    assert(e16.pixels[0] == 0 && e16.pixels[1] == 32896 && e16.pixels[2] == 65535 && e16.pixels[3] == 1799);
+    assert(image::to_image8(e16).pixels == e8.pixels);
+    let ones = image::Image16 { width: 1, height: 1, pixels: [128, 129, 385, 65535] };
+    let n8 = image::to_image8(ones);
+    assert(n8.pixels[0] == 0 && n8.pixels[1] == 1 && n8.pixels[2] == 1 && n8.pixels[3] == 255);
+
+    // Hostile input: nothing aborts and the answer is empty.
+    assert(image::decode16([]).width == 0);
+    assert(image::decode16(png[..20]).width == 0);
+    let cutp = image::decode16(png[..png.len - 20]);
+    assert(cutp.pixels.len == cutp.width * cutp.height * 4);
+    var bad: u8[>..] = [];
+    bad.append(png[..]);
+    bad[40] = bad[40] ^ 255;
+    let crc = image::decode16(bad[..]);
+    assert(crc.pixels.len == crc.width * crc.height * 4);
+    var big: u8[>..] = [];
+    big.append(png[..33]);
+    big[19] = 0x7f; big[20] = 0xff;
+    assert(image::decode16(big[..]).width == 0);
+    assert(image::load16("no-such-file.png").width == 0);
+    let none = image::Image16 { width: 4, height: 4, pixels: [1, 2] };
+    assert(image::encode16(none).len == 0);
+    let short8 = image::Image { width: 4, height: 4, pixels: [1], icc: [], exif: [] };
+    assert(image::to_image8(none).width == 0 && image::to_image16(short8).width == 0);
+    let huge = image::Image16 { width: 2147483647, height: 2147483647, pixels: [1] };
+    assert(image::encode16(huge).len == 0);
+
+    // The orientation: none, out of range, a hostile block.
+    let plain = image::new_image(2, 3, 1, 2, 3, 4);
+    assert(image::orientation(plain) == 1);
+    assert(image::apply_orientation(plain).pixels == plain.pixels);
+    var wb = image::exif_new();
+    image::exif_set_short(wb, 0x0112, 9);
+    let odd = image::Image { width: 2, height: 3, pixels: copy(plain.pixels), icc: [], exif: image::exif_build(wb) };
+    assert(image::orientation(odd) == 1);
+    let junk = image::Image { width: 2, height: 3, pixels: copy(plain.pixels), icc: [], exif: [0x49, 0x49, 42, 0, 8, 0, 0, 0, 255, 255, 1, 2] };
+    assert(image::apply_orientation(junk).pixels == plain.pixels);
+    assert(image::exif_with_short([0x4d, 0x4d, 0, 42], 0x0112, 1).len == 4);
+    var none_b = image::exif_new();
+    assert(image::exif_build(none_b).len == 14);
+    print("png16 cases ok\n");
+}
+
 fn main() {
     meta_cases();
     test_round_trip();
@@ -744,6 +811,7 @@ fn main() {
     jpeg_cases::check_jpeg();
     jpeg_cases::check_jpeg_hostile();
     test_webp();
+    test_png16();
     print("all tests passed");
     return 0;
 }
