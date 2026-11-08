@@ -78,7 +78,8 @@ typedef struct {
     uint32_t acc;
     int nb;
     int counting;       // 1: count the symbols, write nothing
-    long *freq;         // 257 counters of the table that is being built
+    long *freqs[4];     // 257 counters of each table that is being built
+    int tid;            // the table that writes the symbol
     jtab *tab;          // the table that writes the symbols
     int eobrun;
     int be;             // count of buffered correction bits
@@ -103,7 +104,7 @@ static void j_flush(jenc *e) {
     e->acc = 0; e->nb = 0;
 }
 static void j_sym(jenc *e, int s) {
-    if (e->counting) { e->freq[s]++; return; }
+    if (e->counting) { e->freqs[e->tid][s]++; return; }
     j_bits(e, e->tab->code[s], e->tab->size[s]);
 }
 
@@ -201,13 +202,14 @@ static int nbits_of(int v) { int n = 0; while (v) { n++; v >>= 1; } return n; }
 
 // ---- the block coders ----
 
-static void blk_baseline(jenc *e, jtab *dc, jtab *ac, jcomp *c, const int16_t *blk) {
+static void blk_baseline(jenc *e, jtab *dc, jtab *ac, jcomp *c, const int16_t *blk,
+    int dtid, int atid) {
     int diff = blk[0] - c->last_dc;
     c->last_dc = blk[0];
     int a = diff < 0 ? -diff : diff, nb = nbits_of(a);
-    e->tab = dc; j_sym(e, nb);
+    e->tab = dc; e->tid = dtid; j_sym(e, nb);
     j_bits(e, (unsigned)(diff < 0 ? diff - 1 : diff), nb);
-    e->tab = ac;
+    e->tab = ac; e->tid = atid;
     int r = 0;
     for (int k = 1; k < 64; k++) {
         int v = blk[k];
@@ -237,18 +239,19 @@ static void emit_eobrun(jenc *e) {
     }
 }
 
-static void blk_dc_first(jenc *e, jtab *dc, jcomp *c, const int16_t *blk, int al) {
+static void blk_dc_first(jenc *e, jtab *dc, jcomp *c, const int16_t *blk, int al, int dtid) {
     int v = blk[0] >> al;
     int diff = v - c->last_dc;
     c->last_dc = v;
     int a = diff < 0 ? -diff : diff, nb = nbits_of(a);
-    e->tab = dc; j_sym(e, nb);
+    e->tab = dc; e->tid = dtid; j_sym(e, nb);
     j_bits(e, (unsigned)(diff < 0 ? diff - 1 : diff), nb);
 }
 
-static void blk_ac_first(jenc *e, jtab *ac, const int16_t *blk, int ss, int se, int al) {
+static void blk_ac_first(jenc *e, jtab *ac, const int16_t *blk, int ss, int se, int al,
+    int atid) {
     int r = 0;
-    e->tab = ac;
+    e->tab = ac; e->tid = atid;
     for (int k = ss; k <= se; k++) {
         int t = blk[k], t2;
         if (t < 0) { t = -t; t >>= al; t2 = ~t; } else { t >>= al; t2 = t; }
@@ -266,10 +269,11 @@ static void blk_ac_first(jenc *e, jtab *ac, const int16_t *blk, int ss, int se, 
     }
 }
 
-static void blk_ac_refine(jenc *e, jtab *ac, const int16_t *blk, int ss, int se, int al) {
+static void blk_ac_refine(jenc *e, jtab *ac, const int16_t *blk, int ss, int se, int al,
+    int atid) {
     int absv[64], eob = 0, r = 0, br = 0;
     uint8_t *brbuf = e->bitbuf + e->be;
-    e->tab = ac;
+    e->tab = ac; e->tid = atid;
     for (int k = ss; k <= se; k++) {
         int t = blk[k] < 0 ? -blk[k] : blk[k];
         t >>= al;
@@ -320,11 +324,12 @@ static void run_scan(jctx *x, jenc *e, int first, int ncs, int ss, int se, int a
     e->eobrun = 0; e->be = 0; e->acc = 0; e->nb = 0;
     #define CODE(ci, blk) do { jcomp *cc = &x->c[ci]; \
         jtab *dt = x->dc + ((ci) ? 1 : 0), *at = actab ? actab : x->ac + ((ci) ? 1 : 0); \
-        if (!prog) blk_baseline(e, dt, at, cc, blk); \
-        else if (ss == 0) { if (ah == 0) blk_dc_first(e, dt, cc, blk, al); \
+        int dtid = (ci) ? 1 : 0, atid = (ci) ? 3 : 2; \
+        if (!prog) blk_baseline(e, dt, at, cc, blk, dtid, atid); \
+        else if (ss == 0) { if (ah == 0) blk_dc_first(e, dt, cc, blk, al, dtid); \
                             else j_bits(e, (unsigned)((blk)[0] >> al) & 1, 1); } \
-        else if (ah == 0) blk_ac_first(e, at, blk, ss, se, al); \
-        else blk_ac_refine(e, at, blk, ss, se, al); } while (0)
+        else if (ah == 0) blk_ac_first(e, at, blk, ss, se, al, atid); \
+        else blk_ac_refine(e, at, blk, ss, se, al, atid); } while (0)
     (void)dctab;
     if (ncs == 1) {
         jcomp *c = &x->c[first];
@@ -371,7 +376,7 @@ static void do_ac_scan(jctx *x, jenc *e, int ci, int ss, int se, int ah, int al)
     long freq[257];
     jtab t;
     memset(freq, 0, sizeof freq);
-    e->counting = 1; e->freq = freq;
+    e->counting = 1; e->freqs[ci ? 3 : 2] = freq;
     run_scan(x, e, ci, 1, ss, se, ah, al, 1, NULL, &t);
     tab_optimal(&t, freq);
     e->counting = 0;
@@ -404,7 +409,8 @@ static void fdct_quant(const double *in, const uint8_t *qt, int16_t *out, const 
 
 // jpeg_encode: opts holds w, h, quality, progressive, subsampling.
 // Returns 1 and appends the file to out. Returns 0 when the input is bad.
-static int jpeg_core(const uint8_t *px, int w, int h, int quality, int prog, int sub, jbuf *ob) {
+static int jpeg_core(const uint8_t *px, int w, int h, int quality, int prog, int sub,
+    int opt, jbuf *ob) {
     jctx *x = (jctx *)calloc(1, sizeof *x);
     if (!x) return 0;
     int ok = 0;
@@ -507,13 +513,40 @@ static int jpeg_core(const uint8_t *px, int w, int h, int quality, int prog, int
     jenc e;
     memset(&e, 0, sizeof e);
     e.b = b;
+    // The counters of the four tables of the file.
+    long freq[4][257];
+    memset(freq, 0, sizeof freq);
+    for (int i = 0; i < 4; i++) e.freqs[i] = freq[i];
     if (!prog) {
-        put_dht(b, 0, 0, &x->dc[0]); put_dht(b, 1, 0, &x->ac[0]);
-        put_dht(b, 0, 1, &x->dc[1]); put_dht(b, 1, 1, &x->ac[1]);
+        if (opt) {
+            // The first pass counts the symbols of the scan. The tables of
+            // the standard give way to tables that fit the symbols.
+            e.counting = 1;
+            run_scan(x, &e, 0, 3, 0, 63, 0, 0, 0, NULL, NULL);
+            e.counting = 0;
+            tab_optimal(&x->dc[0], freq[0]);
+            tab_optimal(&x->ac[0], freq[2]);
+            tab_optimal(&x->dc[1], freq[1]);
+            tab_optimal(&x->ac[1], freq[3]);
+            put_dht(b, 0, 0, &x->dc[0]); put_dht(b, 1, 0, &x->ac[0]);
+            put_dht(b, 0, 1, &x->dc[1]); put_dht(b, 1, 1, &x->ac[1]);
+        } else {
+            put_dht(b, 0, 0, &x->dc[0]); put_dht(b, 1, 0, &x->ac[0]);
+            put_dht(b, 0, 1, &x->dc[1]); put_dht(b, 1, 1, &x->ac[1]);
+        }
         put_sos(b, 0, 3, 0, 63, 0, 0);
         run_scan(x, &e, 0, 3, 0, 63, 0, 0, 0, NULL, NULL);
     } else {
         // The scan script of libjpeg (jpeg_simple_progression) for YCbCr.
+        if (opt) {
+            // The first pass counts the symbols of the first scan. The
+            // tables of the standard give way to tables that fit them.
+            e.counting = 1;
+            run_scan(x, &e, 0, 3, 0, 0, 0, 1, 1, NULL, NULL);
+            e.counting = 0;
+            tab_optimal(&x->dc[0], freq[0]);
+            tab_optimal(&x->dc[1], freq[1]);
+        }
         put_dht(b, 0, 0, &x->dc[0]); put_dht(b, 0, 1, &x->dc[1]);
         put_sos(b, 0, 3, 0, 0, 0, 1);
         run_scan(x, &e, 0, 3, 0, 0, 0, 1, 1, NULL, NULL);
@@ -539,17 +572,18 @@ done:
 
 // img_jpeg encodes RGBA pixels as a JPEG file and appends it to out. The
 // opts hold the width, the height, the quality (1 to 100), the progressive
-// flag and the subsampling (0 is 4:4:4, 1 is 4:2:2, 2 is 4:2:0).
+// flag, the subsampling (0 is 4:4:4, 1 is 4:2:2, 2 is 4:2:0) and the flag
+// that builds the Huffman tables of the scan.
 uint8_t img_jpeg(jpg_slice pixels, gs_rref out, jpg_islice opts) {
-    if (opts.len != 5) return 0;
+    if (opts.len != 6) return 0;
     int w = opts.data[0], h = opts.data[1], q = opts.data[2];
-    int prog = opts.data[3], sub = opts.data[4];
+    int prog = opts.data[3], sub = opts.data[4], opt = opts.data[5];
     if (w <= 0 || h <= 0 || w > 65535 || h > 65535) return 0;
     if (sub < 0 || sub > 2 || q < 1 || q > 100) return 0;
     if (pixels.len < (int64_t)w * h * 4) return 0;
     jbuf ob;
     memset(&ob, 0, sizeof ob);
-    if (!jpeg_core(pixels.data, w, h, q, prog != 0, sub, &ob)) return 0;
+    if (!jpeg_core(pixels.data, w, h, q, prog != 0, sub, opt != 0, &ob)) return 0;
     gs_bld_append(out, ob.p, (int64_t)ob.n);
     free(ob.p);
     return 1;

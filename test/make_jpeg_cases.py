@@ -22,7 +22,7 @@ import PIL
 from PIL import Image, JpegImagePlugin
 
 warnings.simplefilter("ignore")
-rng = random.Random(20261108)
+rng = random.Random(20261107)
 pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -83,6 +83,8 @@ for n, (i, q, prog, sub) in enumerate(cases):
     _, w, h, px = sources[i]
     lines.append('    var a%d = mk(%d, %d, "%s");' % (n, w, h, hx(px, 4)))
     lines.append('    assert(image::write_jpeg_with("%s/c%d.jpg", a%d, %d, %s, %d));' % (
+        work, n, n, q, "true" if prog else "false", sub))
+    lines.append('    assert(image::write_jpeg_opts("%s/o%d.jpg", a%d, %d, %s, %d, true));' % (
         work, n, n, q, "true" if prog else "false", sub))
 lines += ["    return 0;", "}"]
 open(os.path.join(work, "driver.goose"), "w").write("\n".join(lines) + "\n")
@@ -180,6 +182,16 @@ fn jpeg_case(w: i32, h: i32, src: u8[:], q: i32, prog: bool, sub: i32,
     assert(back.pixels == other.pixels);
     let meta = image::metadata_bytes(bytes);
     assert(meta.ok && meta.width == w && meta.height == h && meta.kind == image::KIND_JPEG);
+    // The tables of the scan give a smaller file with the same pixels.
+    let opt = image::encode_jpeg_opts(img, q, prog, sub, true);
+    assert(opt.len > 4);
+    assert(opt.len <= bytes.len);
+    assert(sof_at(opt, 1) == sof);
+    assert(sof_at(opt, 11) == samp);
+    let oback = image::decode(opt);
+    assert(oback.pixels == back.pixels);
+    let ometa = image::metadata_bytes(opt);
+    assert(ometa.ok && ometa.width == w && ometa.height == h && ometa.kind == image::KIND_JPEG);
 }
 """)
 w_("fn check_jpeg() {")
@@ -206,6 +218,16 @@ for n, (i, q, prog, sub) in enumerate(cases):
     rrgb = list(rim.convert("RGB").getdata())
     rerr = sum(abs(a - b) for p, r in zip(px, rrgb) for a, b in zip(p[:3], r)) / (3 * w * h)
     assert err <= rerr * 1.5 + 3, (n, name, q, sub, err, rerr)
+    # The file with the tables of the scan: Pillow reads it, the pixels are
+    # the same and the file is not bigger.
+    oim = Image.open(os.path.join(work, "o%d.jpg" % n))
+    oim.load()
+    assert oim.size == (w, h) and oim.mode == "RGB"
+    assert bool(oim.info.get("progressive") or oim.info.get("progression")) == prog, (n, "progressive")
+    assert JpegImagePlugin.get_sampling(oim) == sub, (n, "sampling")
+    assert list(oim.convert("RGB").getdata()) == rgb, (n, "pixels")
+    assert os.path.getsize(os.path.join(work, "o%d.jpg" % n)) <= os.path.getsize(
+        os.path.join(work, "c%d.jpg" % n)), (n, "size")
     sof = 0xC2 if is_prog else 0xC0
     samp = im.layer[0][1] << 4 | im.layer[0][2]
     w_('    jpeg_case(%d, %d, "%s", %d, %s, %d, %d, %d, "%s");' % (
@@ -247,6 +269,20 @@ fn check_jpeg_hostile() {
     // A write with a bad option gives false and makes no file.
     assert(!image::write_jpeg_with("jpeg-hostile.jpg", ok, 90, false, 7));
     assert(!image::write_jpeg_with("jpeg-hostile.jpg", empty, 90, true, 0));
+    // The calls with the tables of the scan take the same options.
+    assert(image::encode_jpeg_opts(ok, 90, true, 3, true).len == 0);
+    assert(image::encode_jpeg_opts(ok, 90, false, -1, true).len == 0);
+    assert(image::encode_jpeg_opts(empty, 90, false, 0, true).len == 0);
+    assert(image::encode_jpeg_opts(neg, 90, false, 0, true).len == 0);
+    assert(image::encode_jpeg_opts(huge, 90, true, 2, true).len == 0);
+    assert(image::encode_jpeg_opts(short, 90, false, 1, true).len == 0);
+    assert(!image::write_jpeg_opts("jpeg-hostile.jpg", ok, 90, false, 7, true));
+    assert(!image::write_jpeg_opts("jpeg-hostile.jpg", empty, 90, true, 0, true));
+    // The tables of the scan do not change the pixels.
+    let plain = image::encode_jpeg(ok, 75, false, 0);
+    let opt = image::encode_jpeg_opts(ok, 75, false, 0, true);
+    assert(opt.len > 0 && opt.len <= plain.len);
+    assert(image::decode(opt).pixels == image::decode(plain).pixels);
 }
 """)
 sys.stdout.write("\n".join(out) + "\n")

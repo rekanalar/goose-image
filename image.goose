@@ -195,10 +195,19 @@ const SUBSAMPLING_420 = 2;
 // The result is empty when the subsampling is outside its range. A quality
 // above 100 counts as 100. The alpha part is dropped. The metadata of the image rides along.
 fn encode_jpeg(img: Image&, quality: i32, progressive: bool, subsampling: i32) -> u8[] {
+    return encode_jpeg_opts(img, quality, progressive, subsampling, false);
+}
+
+// encode_jpeg_opts gives the image as a JPEG in memory. The options are as
+// for encode_jpeg. The optimize flag builds the Huffman tables of the scan
+// from the symbols that it holds. The file is then smaller and holds the
+// same pixels.
+fn encode_jpeg_opts(img: Image&, quality: i32, progressive: bool, subsampling: i32,
+    optimize: bool) -> u8[] {
     if !size_ok(img.width, img.height) { return []; }
     if subsampling < 0 || subsampling > 2 { return []; }
     var out: u8[>..] = [];
-    let opts: i32[5] = [img.width, img.height, if quality <= 0 { 90 } else if quality > 100 { 100 } else { quality }, if progressive { 1 } else { 0 }, subsampling];
+    let opts: i32[6] = [img.width, img.height, if quality <= 0 { 90 } else if quality > 100 { 100 } else { quality }, if progressive { 1 } else { 0 }, subsampling, if optimize { 1 } else { 0 }];
     if !img_jpeg(img.pixels, out, opts) { return []; }
     if img.icc.len > 0 || img.exif.len > 0 {
         var full: u8[>..] = [];
@@ -224,6 +233,15 @@ fn encode_webp(img: Image&, quality: i32, lossless: bool) -> u8[] {
 // are as for encode_jpeg.
 fn write_jpeg_with(path: const u8[:], img: Image&, quality: i32, progressive: bool, subsampling: i32) -> bool {
     let out = encode_jpeg(img, quality, progressive, subsampling);
+    if out.len == 0 { return false; }
+    return write_file(path, out);
+}
+
+// write_jpeg_opts writes the image to the path as a JPEG file. The options
+// are as for encode_jpeg_opts.
+fn write_jpeg_opts(path: const u8[:], img: Image&, quality: i32, progressive: bool,
+    subsampling: i32, optimize: bool) -> bool {
+    let out = encode_jpeg_opts(img, quality, progressive, subsampling, optimize);
     if out.len == 0 { return false; }
     return write_file(path, out);
 }

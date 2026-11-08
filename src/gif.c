@@ -349,70 +349,255 @@ static void lzw_encode(bw *w, const uint8_t *px, int64_t n, int mcs) {
 }
 
 // A palette of the writer: the colors and the transparent index.
-typedef struct { uint8_t rgb[768]; int n; int trans; int quant; } wpal;
+typedef struct { uint8_t rgb[768]; int n; int trans; } wpal;
 
-// The hash of a color. It gives the slot in the table of the colors.
-static uint32_t color_hash(int r, int g, int b) {
-    uint32_t key = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-    return (key * 2654435761u) >> 22;
+// ---- The quantizer ----
+//
+// The table of the quantizer holds the colors of one frame. The key of a
+// color is its three parts. The table has a power of two size and uses open
+// addressing. When the frame holds too many colors, the colors fall in
+// boxes of 32 values on a side. The mean of a box is then the color of the
+// box.
+#define QT_BITS 17
+#define QT_SIZE (1 << QT_BITS)
+#define QT_LOAD (QT_SIZE / 2)
+
+typedef struct {
+    uint32_t key;      // the key of the color, 0 means the slot is free
+    uint32_t count;
+    uint32_t rsum, gsum, bsum;
+    uint8_t pidx;      // the place of the color in the palette
+} qent;
+
+typedef struct {
+    qent *tab;
+    int *used;         // the slots that hold a color
+    int n;             // the count of the colors
+} qtab;
+
+static uint32_t qhash(uint32_t key) {
+    return (key * 2654435761u >> 13) & (QT_SIZE - 1);
 }
 
-// build_palette collects the colors of the pixels. It gives 0 when the
-// colors do not fit in the table of 256 entries.
-static int build_palette(const uint8_t *px, int64_t cnt, wpal *pal, int32_t *table) {
-    int32_t keys[1024];
-    memset(keys, -1, sizeof keys);
+// qkey gives the key of a color. The binned form puts the color in a box of
+// 32 values on a side.
+static uint32_t qkey(int r, int g, int b, int binned) {
+    if (binned) return (uint32_t)(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)) + 1;
+    return ((uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b) + 1;
+}
+
+// qadd puts a color in the table.
+static void qadd(qtab *t, uint32_t key, int r, int g, int b) {
+    uint32_t h = qhash(key);
+    for (;;) {
+        qent *e = &t->tab[h];
+        if (!e->key) {
+            e->key = key; e->count = 1; e->rsum = (uint32_t)r;
+            e->gsum = (uint32_t)g; e->bsum = (uint32_t)b; e->pidx = 0;
+            t->used[t->n++] = (int)h;
+            return;
+        }
+        if (e->key == key) {
+            e->count++; e->rsum += (uint32_t)r; e->gsum += (uint32_t)g; e->bsum += (uint32_t)b;
+            return;
+        }
+        h = (h + 1) & (QT_SIZE - 1);
+    }
+}
+
+// qfind gives the slot of a color. It gives 0 when the color is not there.
+static qent *qfind(qtab *t, uint32_t key) {
+    uint32_t h = qhash(key);
+    for (;;) {
+        qent *e = &t->tab[h];
+        if (!e->key) return NULL;
+        if (e->key == key) return e;
+        h = (h + 1) & (QT_SIZE - 1);
+    }
+}
+
+// qreset empties the table.
+static void qreset(qtab *t) {
+    for (int i = 0; i < t->n; i++) {
+        qent *e = &t->tab[t->used[i]];
+        e->key = 0; e->count = 0; e->rsum = 0; e->gsum = 0; e->bsum = 0;
+    }
+    t->n = 0;
+}
+
+// qscan puts the colors of the pixels in the table. A clear pixel gets no
+// color. It gives 0 when the table cannot hold the colors. binned gives 1
+// when the colors fell in boxes.
+static int qscan(qtab *t, const uint8_t *px, int64_t cnt, int *trans, int *binned) {
+    *trans = 0;
+    *binned = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        qreset(t);
+        int over = 0, tr = 0;
+        for (int64_t i = 0; i < cnt; i++) {
+            const uint8_t *p = px + i * 4;
+            if (p[3] < 128) { tr = 1; continue; }
+            if (t->n >= QT_LOAD) { over = 1; break; }
+            qadd(t, qkey(p[0], p[1], p[2], *binned), p[0], p[1], p[2]);
+        }
+        if (!over) { *trans = tr; return 1; }
+        if (*binned) return 0;
+        *binned = 1;
+    }
+    return 0;
+}
+
+// A color of the median cut.
+typedef struct { uint8_t r, g, b; uint32_t count; } qcol;
+
+// A box of the median cut. It holds the places of the colors in the list.
+typedef struct {
+    int *it;
+    int n;
+    uint32_t count;
+    uint32_t rsum, gsum, bsum;
+    uint8_t rmin, rmax, gmin, gmax, bmin, bmax;
+} qbox;
+
+// The sort of the median cut needs the list and the part. They are global,
+// because the sort function of C takes no other argument.
+static const qcol *g_mc_list;
+static int g_mc_part;
+
+static int mc_cmp(const void *a, const void *b) {
+    const qcol *x = g_mc_list + *(const int *)a;
+    const qcol *y = g_mc_list + *(const int *)b;
+    int vx = g_mc_part == 0 ? x->r : (g_mc_part == 1 ? x->g : x->b);
+    int vy = g_mc_part == 0 ? y->r : (g_mc_part == 1 ? y->g : y->b);
+    return vx - vy;
+}
+
+// box_stats measures a box.
+static void box_stats(qbox *bx, const qcol *list) {
+    uint32_t c = 0, rs = 0, gs = 0, bs = 0;
+    int rmin = 255, rmax = 0, gmin = 255, gmax = 0, bmin = 255, bmax = 0;
+    for (int i = 0; i < bx->n; i++) {
+        const qcol *q = &list[bx->it[i]];
+        c += q->count;
+        rs += q->count * q->r;
+        gs += q->count * q->g;
+        bs += q->count * q->b;
+        if (q->r < rmin) rmin = q->r;
+        if (q->r > rmax) rmax = q->r;
+        if (q->g < gmin) gmin = q->g;
+        if (q->g > gmax) gmax = q->g;
+        if (q->b < bmin) bmin = q->b;
+        if (q->b > bmax) bmax = q->b;
+    }
+    bx->count = c; bx->rsum = rs; bx->gsum = gs; bx->bsum = bs;
+    bx->rmin = (uint8_t)rmin; bx->rmax = (uint8_t)rmax;
+    bx->gmin = (uint8_t)gmin; bx->gmax = (uint8_t)gmax;
+    bx->bmin = (uint8_t)bmin; bx->bmax = (uint8_t)bmax;
+}
+
+// median_palette builds a palette of at most maxc colors from the colors in
+// the table. It gives 0 when the memory is gone.
+static int median_palette(qtab *t, wpal *pal, int maxc) {
+    int nc = t->n;
+    qcol *list = (qcol *)malloc((size_t)nc * sizeof(qcol));
+    qbox *boxes = (qbox *)calloc((size_t)maxc, sizeof(qbox));
+    if (!list || !boxes) { free(list); free(boxes); return 0; }
+    for (int i = 0; i < nc; i++) {
+        qent *e = &t->tab[t->used[i]];
+        list[i].r = (uint8_t)(e->rsum / e->count);
+        list[i].g = (uint8_t)(e->gsum / e->count);
+        list[i].b = (uint8_t)(e->bsum / e->count);
+        list[i].count = e->count;
+    }
+    boxes[0].it = (int *)malloc((size_t)nc * sizeof(int));
+    if (!boxes[0].it) { free(list); free(boxes); return 0; }
+    for (int i = 0; i < nc; i++) boxes[0].it[i] = i;
+    boxes[0].n = nc;
+    box_stats(&boxes[0], list);
+    int nb = 1;
+    while (nb < maxc) {
+        // The box with the most pixels and the largest range.
+        int best = -1;
+        uint32_t bestscore = 0;
+        for (int i = 0; i < nb; i++) {
+            if (boxes[i].n < 2) continue;
+            uint32_t rng = boxes[i].rmax - boxes[i].rmin;
+            uint32_t d = boxes[i].gmax - boxes[i].gmin;
+            if (d > rng) rng = d;
+            d = boxes[i].bmax - boxes[i].bmin;
+            if (d > rng) rng = d;
+            uint32_t score = boxes[i].count * (rng + 1);
+            if (best < 0 || score > bestscore) { best = i; bestscore = score; }
+        }
+        if (best < 0) break;
+        qbox *bx = &boxes[best];
+        // The part with the largest range holds the split.
+        uint32_t rng = bx->rmax - bx->rmin;
+        int part = 0;
+        uint32_t d = bx->gmax - bx->gmin;
+        if (d > rng) { rng = d; part = 1; }
+        d = bx->bmax - bx->bmin;
+        if (d > rng) part = 2;
+        g_mc_list = list;
+        g_mc_part = part;
+        qsort(bx->it, (size_t)bx->n, sizeof(int), mc_cmp);
+        // The split lies at the half of the pixels.
+        uint32_t half = bx->count / 2, acc = 0;
+        int k = 1;
+        for (int i = 0; i < bx->n - 1; i++) {
+            acc += list[bx->it[i]].count;
+            if (acc >= half) { k = i + 1; break; }
+        }
+        if (k < 1) k = 1;
+        if (k > bx->n - 1) k = bx->n - 1;
+        qbox nbx;
+        nbx.it = (int *)malloc((size_t)k * sizeof(int));
+        if (!nbx.it) break;
+        nbx.n = k;
+        memcpy(nbx.it, bx->it, (size_t)k * sizeof(int));
+        memmove(bx->it, bx->it + k, (size_t)(bx->n - k) * sizeof(int));
+        bx->n -= k;
+        box_stats(bx, list);
+        box_stats(&nbx, list);
+        boxes[nb++] = nbx;
+    }
     pal->n = 0;
-    pal->trans = -1;
-    pal->quant = 0;
-    for (int64_t i = 0; i < cnt; i++) {
-        const uint8_t *p = px + i * 4;
-        if (p[3] < 128) { pal->trans = pal->n; continue; }
-        int32_t key = (p[0] << 16) | (p[1] << 8) | p[2];
-        uint32_t h = color_hash(p[0], p[1], p[2]);
-        while (keys[h] != -1 && keys[h] != key) h = (h + 1) & 1023;
-        if (keys[h] == key) continue;
-        if (pal->n >= 255) return 0;
-        keys[h] = key;
-        pal->rgb[pal->n * 3] = p[0];
-        pal->rgb[pal->n * 3 + 1] = p[1];
-        pal->rgb[pal->n * 3 + 2] = p[2];
-        table[pal->n] = key;
+    for (int i = 0; i < nb; i++) {
+        qbox *bx = &boxes[i];
+        pal->rgb[pal->n * 3] = (uint8_t)(bx->rsum / bx->count);
+        pal->rgb[pal->n * 3 + 1] = (uint8_t)(bx->gsum / bx->count);
+        pal->rgb[pal->n * 3 + 2] = (uint8_t)(bx->bsum / bx->count);
         pal->n++;
     }
-    if (pal->trans >= 0) {
-        // The transparent entry takes one slot more.
-        if (pal->n >= 256) return 0;
-        pal->trans = pal->n;
-        pal->n++;
-    }
+    for (int i = 0; i < nb; i++) free(boxes[i].it);
+    free(boxes);
+    free(list);
     return 1;
 }
 
-// quant_palette gives the fixed palette of 128 colors for a frame with
-// more colors than the table holds. The index of a color is built from the
-// top bits of its parts.
-static void quant_palette(wpal *pal) {
-    pal->n = 128;
-    pal->quant = 1;
-    for (int i = 0; i < 128; i++) {
-        pal->rgb[i * 3] = (uint8_t)(((i >> 4) & 7) * 255 / 7);
-        pal->rgb[i * 3 + 1] = (uint8_t)(((i >> 1) & 7) * 255 / 7);
-        pal->rgb[i * 3 + 2] = (uint8_t)((i & 1) * 255);
+// qmap gives the place of every color of the table in the palette. The
+// exact form gives each color its own place. The other form gives the
+// place of the nearest color of the palette.
+static void qmap(qtab *t, const wpal *pal, int exact) {
+    // The clear color of the palette holds no color of the frame.
+    int n = pal->trans >= 0 ? pal->n - 1 : pal->n;
+    for (int i = 0; i < t->n; i++) {
+        qent *e = &t->tab[t->used[i]];
+        if (exact) { e->pidx = (uint8_t)i; continue; }
+        int r = (int)(e->rsum / e->count);
+        int g = (int)(e->gsum / e->count);
+        int b = (int)(e->bsum / e->count);
+        int best = 0;
+        long bd = -1;
+        for (int j = 0; j < n; j++) {
+            long dr = r - pal->rgb[j * 3];
+            long dg = g - pal->rgb[j * 3 + 1];
+            long db = b - pal->rgb[j * 3 + 2];
+            long d = dr * dr + dg * dg + db * db;
+            if (bd < 0 || d < bd) { bd = d; best = j; }
+        }
+        e->pidx = (uint8_t)best;
     }
-}
-
-// quant_index gives the index of a color in the fixed palette.
-static int quant_index(const uint8_t *p) {
-    return (p[0] >> 5) * 16 + (p[1] >> 5) * 2 + (p[2] >> 7);
-}
-
-// palette_index gives the index of a color in an exact palette.
-static int palette_index(const wpal *pal, const int32_t *table, const uint8_t *p) {
-    int32_t key = (p[0] << 16) | (p[1] << 8) | p[2];
-    for (int i = 0; i < pal->n; i++)
-        if (table[i] == key) return i;
-    return 0;
 }
 
 // write_table writes a color table of 2^bits entries.
@@ -428,6 +613,9 @@ static int table_bits(int n) {
     while ((1 << bits) < n) bits++;
     return bits;
 }
+
+// The part of the screen that a frame writes.
+typedef struct { int x, y, w, h; } gregion;
 
 // img_gif_encode writes the frames as a GIF89a. meta holds the width, the
 // height, the loop count and the frame count, and then the width, the
@@ -446,28 +634,108 @@ uint8_t img_gif_encode(img_slice pixels, gs_rref out, gif_islice meta) {
         total += (int64_t)fw * fh * 4;
     }
     if (pixels.len != total) return 0;
+    // The writer cuts a frame to the part of the screen that changed. It
+    // does so when every frame holds the whole screen and no frame clears
+    // the screen.
+    int cut = nf > 1;
+    for (int f = 0; f < nf; f++)
+        if (fr[f * 4] != W || fr[f * 4 + 1] != H || (fr[f * 4 + 3] != 0 && fr[f * 4 + 3] != 1)) cut = 0;
     wpal *pals = (wpal *)calloc((size_t)nf, sizeof(wpal));
-    int32_t *tables = (int32_t *)calloc((size_t)nf * 256, sizeof(int32_t));
+    gregion *regs = (gregion *)calloc((size_t)nf, sizeof(gregion));
+    qtab qt;
+    qt.tab = (qent *)calloc(QT_SIZE, sizeof(qent));
+    qt.used = (int *)malloc((size_t)QT_SIZE * sizeof(int));
+    qt.n = 0;
+    uint8_t *cur = cut ? (uint8_t *)calloc((size_t)W * H * 4, 1) : NULL;
+    uint8_t *reg = NULL;
     uint8_t *idx = NULL;
+    uint8_t ok = 0;
     bw w = {0};
-    if (!pals || !tables) { free(pals); free(tables); return 0; }
-    const uint8_t *px = pixels.data;
-    // The palette of every frame.
+    if (!pals || !regs || !qt.tab || !qt.used || (cut && !cur)) goto done;
+    // The part of the screen that every frame writes.
+    {
+        const uint8_t *px = pixels.data;
+        for (int f = 0; f < nf; f++) {
+            int32_t fw = fr[f * 4], fh = fr[f * 4 + 1];
+            int x0 = W, y0 = H, x1 = -1, y1 = -1;
+            if (cut) {
+                for (int y = 0; y < fh; y++)
+                    for (int x = 0; x < fw; x++) {
+                        const uint8_t *p = px + ((size_t)y * fw + x) * 4;
+                        const uint8_t *q = cur + ((size_t)y * W + x) * 4;
+                        if (memcmp(p, q, 4)) {
+                            if (x < x0) x0 = x;
+                            if (x > x1) x1 = x;
+                            if (y < y0) y0 = y;
+                            if (y > y1) y1 = y;
+                        }
+                    }
+                if (x1 < 0) { x0 = 0; y0 = 0; x1 = 0; y1 = 0; }
+            } else {
+                x0 = 0; y0 = 0; x1 = fw - 1; y1 = fh - 1;
+            }
+            regs[f].x = x0; regs[f].y = y0; regs[f].w = x1 - x0 + 1; regs[f].h = y1 - y0 + 1;
+            // The canvas of the reader after the frame. A clear pixel keeps
+            // the color of the canvas.
+            if (cut)
+                for (int y = 0; y < fh; y++)
+                    for (int x = 0; x < fw; x++) {
+                        const uint8_t *p = px + ((size_t)y * fw + x) * 4;
+                        uint8_t *q = cur + ((size_t)y * W + x) * 4;
+                        if (p[3] >= 128) memcpy(q, p, 4);
+                    }
+            px += (size_t)fw * fh * 4;
+        }
+    }
+    // The room for the part of the screen that a frame writes.
+    int64_t maxpix = 0;
     for (int f = 0; f < nf; f++) {
-        int32_t fw = fr[f * 4], fh = fr[f * 4 + 1];
-        int64_t cnt = (int64_t)fw * fh;
-        int32_t *table = tables + (size_t)f * 256;
-        if (!build_palette(px, cnt, &pals[f], table)) quant_palette(&pals[f]);
-        px += cnt * 4;
+        int64_t n = (int64_t)regs[f].w * regs[f].h;
+        if (n > maxpix) maxpix = n;
+    }
+    reg = (uint8_t *)malloc((size_t)maxpix * 4);
+    idx = (uint8_t *)malloc((size_t)maxpix);
+    if (!reg || !idx) goto done;
+    // The palette of every frame.
+    {
+        const uint8_t *px = pixels.data;
+        for (int f = 0; f < nf; f++) {
+            int32_t fw = fr[f * 4], fh = fr[f * 4 + 1];
+            gregion *rg = &regs[f];
+            int64_t cnt = (int64_t)rg->w * rg->h;
+            for (int y = 0; y < rg->h; y++)
+                memcpy(reg + (size_t)y * rg->w * 4,
+                       px + ((size_t)(rg->y + y) * fw + rg->x) * 4, (size_t)rg->w * 4);
+            int trans = 0, binned = 0;
+            if (!qscan(&qt, reg, cnt, &trans, &binned)) goto done;
+            int maxc = trans ? 255 : 256;
+            wpal *pal = &pals[f];
+            if (qt.n <= maxc) {
+                // The frame holds few enough colors to keep every one.
+                pal->n = 0;
+                for (int i = 0; i < qt.n; i++) {
+                    qent *e = &qt.tab[qt.used[i]];
+                    pal->rgb[pal->n * 3] = (uint8_t)(e->rsum / e->count);
+                    pal->rgb[pal->n * 3 + 1] = (uint8_t)(e->gsum / e->count);
+                    pal->rgb[pal->n * 3 + 2] = (uint8_t)(e->bsum / e->count);
+                    pal->n++;
+                }
+            } else if (!median_palette(&qt, pal, maxc)) {
+                goto done;
+            }
+            pal->trans = -1;
+            if (trans) { pal->trans = pal->n; pal->n++; }
+            px += (size_t)fw * fh * 4;
+        }
     }
     // The frames share one palette when they all have the same colors.
     int shared = 1;
     for (int f = 1; f < nf && shared; f++) {
-        if (pals[f].n != pals[0].n || pals[f].trans != pals[0].trans || pals[f].quant != pals[0].quant) { shared = 0; break; }
+        if (pals[f].n != pals[0].n || pals[f].trans != pals[0].trans) { shared = 0; break; }
         if (memcmp(pals[f].rgb, pals[0].rgb, (size_t)pals[0].n * 3)) shared = 0;
     }
     int gbits = shared ? table_bits(pals[0].n) : 0;
-    px = pixels.data;
+    const uint8_t *px = pixels.data;
     bw_byte(&w, 'G'); bw_byte(&w, 'I'); bw_byte(&w, 'F');
     bw_byte(&w, '8'); bw_byte(&w, '9'); bw_byte(&w, 'a');
     bw_u16(&w, W); bw_u16(&w, H);
@@ -482,18 +750,23 @@ uint8_t img_gif_encode(img_slice pixels, gs_rref out, gif_islice meta) {
         bw_byte(&w, 3); bw_byte(&w, 1); bw_u16(&w, loop); bw_byte(&w, 0);
     }
     for (int f = 0; f < nf && !w.err; f++) {
-        int fw = fr[f * 4], fh = fr[f * 4 + 1];
-        int64_t cnt = (int64_t)fw * fh;
+        int32_t fw = fr[f * 4], fh = fr[f * 4 + 1];
+        gregion *rg = &regs[f];
+        int64_t cnt = (int64_t)rg->w * rg->h;
         const wpal *pal = shared ? &pals[0] : &pals[f];
         int bits = shared ? gbits : table_bits(pal->n);
-        int32_t *table = shared ? tables : tables + (size_t)f * 256;
-        free(idx);
-        idx = (uint8_t *)malloc((size_t)cnt);
-        if (!idx) { w.err = 1; break; }
+        for (int y = 0; y < rg->h; y++)
+            memcpy(reg + (size_t)y * rg->w * 4,
+                   px + ((size_t)(rg->y + y) * fw + rg->x) * 4, (size_t)rg->w * 4);
+        int trans = 0, binned = 0;
+        if (!qscan(&qt, reg, cnt, &trans, &binned)) { w.err = 1; break; }
+        int maxc = trans ? 255 : 256;
+        qmap(&qt, pal, qt.n <= maxc);
         for (int64_t i = 0; i < cnt; i++) {
-            const uint8_t *p = px + i * 4;
+            const uint8_t *p = reg + i * 4;
             if (p[3] < 128) { idx[i] = (uint8_t)pal->trans; continue; }
-            idx[i] = (uint8_t)(pal->quant ? quant_index(p) : palette_index(pal, table, p));
+            qent *e = qfind(&qt, qkey(p[0], p[1], p[2], binned));
+            idx[i] = e ? e->pidx : 0;
         }
         // The graphic control extension holds the delay and the disposal.
         bw_byte(&w, 0x21); bw_byte(&w, 0xF9); bw_byte(&w, 4);
@@ -501,17 +774,19 @@ uint8_t img_gif_encode(img_slice pixels, gs_rref out, gif_islice meta) {
         bw_u16(&w, fr[f * 4 + 2]);
         bw_byte(&w, pal->trans >= 0 ? pal->trans : 0);
         bw_byte(&w, 0);
-        // The image descriptor.
+        // The image descriptor. It holds the part of the screen that changed.
         bw_byte(&w, 0x2C);
-        bw_u16(&w, 0); bw_u16(&w, 0); bw_u16(&w, fw); bw_u16(&w, fh);
+        bw_u16(&w, rg->x); bw_u16(&w, rg->y); bw_u16(&w, rg->w); bw_u16(&w, rg->h);
         bw_byte(&w, shared ? 0 : (0x80 | (bits - 1)));
         if (!shared) write_table(&w, pal, bits);
         lzw_encode(&w, idx, cnt, bits < 2 ? 2 : bits);
-        px += cnt * 4;
+        px += (size_t)fw * fh * 4;
     }
     bw_byte(&w, 0x3B);
-    uint8_t ok = !w.err;
+    ok = !w.err;
     if (ok) gs_bld_append(out, w.p, w.n);
-    free(w.p); free(idx); free(pals); free(tables);
+done:
+    free(w.p); free(idx); free(reg); free(cur); free(qt.used); free(qt.tab);
+    free(regs); free(pals);
     return ok;
 }
