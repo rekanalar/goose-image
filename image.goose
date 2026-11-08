@@ -32,6 +32,9 @@ extern fn img_encode(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, format:
 extern fn img_jpeg(pixels: const u8[:], out: u8[>..]&, opts: const i32[:]) -> bool;
 extern fn img_encode_webp(pixels: const u8[:], out: u8[>..]&, w: i32, h: i32, quality: i32, lossless: i32) -> bool;
 extern fn img_resize(src: const u8[:], out: u8[>..]&, dims: const i32[:]) -> bool;
+extern fn img_decode16(data: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
+extern fn img_load16(path: const u8[:], out: u8[>..]&, w: i32&, h: i32&) -> bool;
+extern fn img_encode16(pixels: const u16[:], out: u8[>..]&, w: i32, h: i32) -> bool;
 extern fn img_meta(data: const u8[:], icc: u8[>..]&, exif: u8[>..]&) -> bool;
 extern fn img_meta_encode(base: const u8[:], out: u8[>..]&, icc: const u8[:], exif: const u8[:]) -> bool;
 
@@ -335,4 +338,113 @@ fn new_image(width: i32, height: i32, r: u8, g: u8, b: u8, a: u8) -> Image {
         pixels.push(if i % 4 == 0 { r } else if i % 4 == 1 { g } else if i % 4 == 2 { b } else { a });
     }
     return Image { width: width, height: height, pixels: pixels[..], icc: [], exif: [] };
+}
+
+// Image16 holds the pixels of an image with 16 bits for each part. The
+// pixels are RGBA, four u16 values each. A source with 8 bits widens by
+// the factor 257. A gray source gives r = g = b.
+struct Image16 {
+    width: i32,
+    height: i32,
+    pixels: u16[],
+}
+
+// words_of joins pairs of bytes, low byte first, into u16 values.
+fn words_of(raw: const u8[:]) -> u16[] {
+    var out: u16[>..] = [];
+    var i: i64 = 0;
+    while i + 1 < raw.len {
+        out.push((raw[i] as i64 | (raw[i + 1] as i64) << 8) as u16);
+        i += 2;
+    }
+    return out[..];
+}
+
+fn empty_image16() -> Image16 {
+    return Image16 { width: 0, height: 0, pixels: [] };
+}
+
+// decode16 reads an image of 16 bits from encoded bytes. It reads what
+// stb_image reads, which is PNG with 16 bits and the 8-bit forms. WebP and
+// a bad file give an empty image.
+fn decode16(data: const u8[:]) -> Image16 {
+    var raw: u8[>..] = [];
+    var w: i32 = 0;
+    var h: i32 = 0;
+    if !img_decode16(data, raw, w, h) { return empty_image16(); }
+    return Image16 { width: w, height: h, pixels: words_of(raw[..]) };
+}
+
+// load16 is decode16 for the file at the path.
+fn load16(path: const u8[:]) -> Image16 {
+    var raw: u8[>..] = [];
+    var w: i32 = 0;
+    var h: i32 = 0;
+    if !img_load16(path, raw, w, h) { return empty_image16(); }
+    return Image16 { width: w, height: h, pixels: words_of(raw[..]) };
+}
+
+// encode16 gives the image as a PNG with 16 bits for each part, RGBA. The
+// result is empty when the size or the buffer is bad.
+fn encode16(img: Image16&) -> u8[] {
+    var out: u8[>..] = [];
+    if !size_ok(img.width, img.height) { return []; }
+    if !img_encode16(img.pixels, out, img.width, img.height) { return []; }
+    return out[..];
+}
+
+// write16 writes the image as a PNG with 16 bits to the path.
+fn write16(path: const u8[:], img: Image16&) -> bool {
+    let out = encode16(img);
+    if out.len == 0 { return false; }
+    return write_file(path, out);
+}
+
+// to_image16 widens each part by the factor 257, so 255 gives 65535.
+fn to_image16(img: Image&) -> Image16 {
+    if !size_ok(img.width, img.height) || img.pixels.len < img.width * img.height * 4 { return empty_image16(); }
+    var out: u16[>..] = [];
+    let n: i64 = img.width * img.height * 4;
+    for i in 0..n { out.push((img.pixels[i] as i64 * 257) as u16); }
+    return Image16 { width: img.width, height: img.height, pixels: out[..] };
+}
+
+// to_image8 narrows each part with rounding: (v + 128) / 257. This is
+// the form of the Rust image crate. stb_image and Go image/color cut with
+// v >> 8, and Pillow clips I;16 to L, so the libraries disagree.
+fn to_image8(img: Image16&) -> Image {
+    if !size_ok(img.width, img.height) || img.pixels.len < img.width * img.height * 4 { return empty_image(); }
+    var out: u8[>..] = [];
+    let n: i64 = img.width * img.height * 4;
+    for i in 0..n { out.push(((img.pixels[i] as i64 + 128) / 257) as u8); }
+    return Image { width: img.width, height: img.height, pixels: out[..], icc: [], exif: [] };
+}
+
+// orientation gives the EXIF orientation of the image, 1 to 8. It gives 1
+// when the tag is missing or holds another number.
+fn orientation(img: Image&) -> i32 {
+    let o = exif_short(img.exif[..], 0x0112);
+    if o < 1 || o > 8 { return 1; }
+    return o as i32;
+}
+
+// apply_orientation turns the pixels upright by the orientation tag, like
+// ImageOps.exif_transpose. The result holds the ICC and the EXIF with the
+// tag set to 1, where Pillow drops the tag. An upright image comes back as a copy, tag included, as in
+// Pillow.
+fn apply_orientation(img: Image&) -> Image {
+    let o = orientation(img);
+    var op: i32 = -1;
+    if o == 2 { op = TRANSPOSE_FLIP_LEFT_RIGHT; }
+    if o == 3 { op = TRANSPOSE_ROTATE_180; }
+    if o == 4 { op = TRANSPOSE_FLIP_TOP_BOTTOM; }
+    if o == 5 { op = TRANSPOSE_TRANSPOSE; }
+    if o == 6 { op = TRANSPOSE_ROTATE_270; }
+    if o == 7 { op = TRANSPOSE_TRANSVERSE; }
+    if o == 8 { op = TRANSPOSE_ROTATE_90; }
+    if op < 0 {
+        return Image { width: img.width, height: img.height, pixels: copy(img.pixels), icc: copy(img.icc), exif: copy(img.exif) };
+    }
+    let t = transpose(img, op);
+    return Image { width: t.width, height: t.height, pixels: copy(t.pixels), icc: copy(t.icc), exif: exif_with_short(img.exif[..], 0x0112, 1) };
 }

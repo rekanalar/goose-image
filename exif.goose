@@ -131,3 +131,140 @@ fn exif_short(tiff: const u8[:], tag: i64) -> i64 {
     if v.len == 4 { return num_at(v, 0, 4, big); }
     return 0;
 }
+
+// ---- The builder of an EXIF block ----
+
+// ExifBuilder holds the tags of IFD0 as records in one pool. A record is
+// the tag, the kind (2 bytes each), the count (4 bytes) and the value
+// bytes, all little endian. Build with exif_build.
+struct ExifBuilder {
+    pool: u8[>..],
+}
+
+fn exif_new() -> ExifBuilder {
+    return ExifBuilder { pool: [] };
+}
+
+fn put_le(pool: u8[>..]&, v: i64, width: i64) {
+    var i: i64 = 0;
+    while i < width {
+        pool.push(((v >> (8 * i)) & 255) as u8);
+        i += 1;
+    }
+}
+
+fn exif_add(b: ExifBuilder&, tag: i64, kind: i64, count: i64) {
+    put_le(b.pool, tag, 2);
+    put_le(b.pool, kind, 2);
+    put_le(b.pool, count, 4);
+}
+
+// exif_set_short adds a SHORT tag. A later set of the same tag wins.
+fn exif_set_short(b: ExifBuilder&, tag: i64, v: i64) {
+    exif_add(b, tag, TYPE_SHORT, 1);
+    put_le(b.pool, v & 0xffff, 2);
+}
+
+fn exif_set_long(b: ExifBuilder&, tag: i64, v: i64) {
+    exif_add(b, tag, TYPE_LONG, 1);
+    put_le(b.pool, v & 0xffffffff, 4);
+}
+
+// exif_set_text adds an ASCII tag. The zero byte at the end comes with it.
+fn exif_set_text(b: ExifBuilder&, tag: i64, s: const u8[:]) {
+    exif_add(b, tag, TYPE_ASCII, s.len + 1);
+    for i in 0..s.len { b.pool.push(s[i]); }
+    b.pool.push(0);
+}
+
+// exif_set_rational adds a RATIONAL tag, a numerator and a denominator.
+fn exif_set_rational(b: ExifBuilder&, tag: i64, num: i64, den: i64) {
+    exif_add(b, tag, TYPE_RATIONAL, 1);
+    put_le(b.pool, num & 0xffffffff, 4);
+    put_le(b.pool, den & 0xffffffff, 4);
+}
+
+// record_len gives the length of the record at `at` of the pool.
+fn record_len(pool: const u8[:], at: i64) -> i64 {
+    let kind = num_at(pool, at + 2, 2, false);
+    let count = num_at(pool, at + 4, 4, false);
+    return 8 + size_of_type(kind) * count;
+}
+
+// exif_build gives the TIFF block: the header II, 42 and the offset 8,
+// then IFD0 with the entries sorted by tag, then the values that need
+// more than four bytes. The values start on even places. The next IFD
+// offset is 0. A tag set twice counts once, the last set.
+fn exif_build(b: ExifBuilder&) -> u8[] {
+    let pool = b.pool[..];
+    // The records to write: the last record of each tag, in tag order.
+    var order: i64[>..] = [];
+    var prev: i64 = -1;
+    while true {
+        var best: i64 = -1;
+        var best_tag: i64 = 0;
+        var at: i64 = 0;
+        while at < pool.len {
+            let tag = num_at(pool, at, 2, false);
+            if tag > prev && (best < 0 || tag <= best_tag) {
+                best = at;
+                best_tag = tag;
+            }
+            at += record_len(pool, at);
+        }
+        if best < 0 { break; }
+        order.push(best);
+        prev = best_tag;
+    }
+    let n = order.len;
+    var out: u8[>..] = [];
+    out.push(0x49); out.push(0x49); out.push(42); out.push(0);
+    put_le(out, 8, 4);
+    put_le(out, n, 2);
+    let data_at: i64 = 8 + 2 + 12 * n + 4;
+    var tail: u8[>..] = [];
+    for k in 0..n {
+        let at = order[k];
+        let bytes = record_len(pool, at) - 8;
+        for j in 0..8 { out.push(pool[at + j]); }
+        if bytes <= 4 {
+            for j in 0..4 { out.push(if j < bytes { pool[at + 8 + j] } else { 0 }); }
+        } else {
+            put_le(out, data_at + tail.len, 4);
+            for j in 0..bytes { tail.push(pool[at + 8 + j]); }
+            if tail.len % 2 == 1 { tail.push(0); }
+        }
+    }
+    put_le(out, 0, 4);
+    for j in 0..tail.len { out.push(tail[j]); }
+    return out[..];
+}
+
+// exif_with_short gives a copy of the block with the SHORT value of one
+// tag of IFD0 replaced. The block comes back unchanged when the tag is
+// missing, is not a SHORT or the block is hostile.
+fn exif_with_short(tiff: const u8[:], want: i64, v: i64) -> u8[] {
+    var out: u8[>..] = [];
+    for i in 0..tiff.len { out.push(tiff[i]); }
+    let big, ok = order_of(tiff);
+    if !ok || num_at(tiff, 2, 2, big) != 42 { return out[..]; }
+    let ifd = num_at(tiff, 4, 4, big);
+    if ifd <= 0 || ifd + 2 > tiff.len { return out[..]; }
+    let count = num_at(tiff, ifd, 2, big);
+    var i: i64 = 0;
+    while i < count && ifd + 2 + 12 * i + 12 <= tiff.len {
+        let at = ifd + 2 + 12 * i;
+        if num_at(tiff, at, 2, big) == want && num_at(tiff, at + 2, 2, big) == TYPE_SHORT && num_at(tiff, at + 4, 4, big) == 1 {
+            if big {
+                out[at + 8] = ((v >> 8) & 255) as u8;
+                out[at + 9] = (v & 255) as u8;
+            } else {
+                out[at + 8] = (v & 255) as u8;
+                out[at + 9] = ((v >> 8) & 255) as u8;
+            }
+            return out[..];
+        }
+        i += 1;
+    }
+    return out[..];
+}

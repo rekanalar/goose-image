@@ -90,6 +90,41 @@ static uint8_t decode_core(const uint8_t *bytes, int64_t size, gs_rref out,
     return 1;
 }
 
+// decode16 turns encoded bytes into RGBA pixels of 16 bits. The pixels
+// go out as pairs of bytes, low byte first. WebP and the other 8-bit sources widen by
+// the factor 257 inside stb_image.
+static uint8_t decode16_core(const uint8_t *bytes, int64_t size, gs_rref out,
+                             int32_t *w, int32_t *h) {
+    if (size <= 0 || size > 0x7fffffff || is_webp(bytes, size)) return 0;
+    int width = 0, height = 0, channels = 0;
+    stbi_us *pixels = stbi_load_16_from_memory(bytes, (int)size, &width, &height, &channels, 4);
+    if (!pixels) return 0;
+    // Low byte first, so the Goose side needs no byte order test.
+    int64_t n = (int64_t)width * height * 4;
+    uint8_t *le = (uint8_t *)malloc((size_t)n * 2);
+    if (!le) { stbi_image_free(pixels); return 0; }
+    for (int64_t i = 0; i < n; i++) { le[2 * i] = (uint8_t)pixels[i]; le[2 * i + 1] = (uint8_t)(pixels[i] >> 8); }
+    gs_bld_append(out, le, n * 2);
+    free(le);
+    stbi_image_free(pixels);
+    *w = (int32_t)width;
+    *h = (int32_t)height;
+    return 1;
+}
+
+uint8_t img_decode16(img_slice data, gs_rref out, int32_t *w, int32_t *h) {
+    return decode16_core(data.data, data.len, out, w, h);
+}
+
+uint8_t img_load16(img_slice path, gs_rref out, int32_t *w, int32_t *h) {
+    int64_t size = 0;
+    uint8_t *bytes = read_file_bytes(path, &size);
+    if (!bytes) return 0;
+    uint8_t ok = decode16_core(bytes, size, out, w, h);
+    free(bytes);
+    return ok;
+}
+
 // img_load reads the image at the path. Pixels are RGBA, row by row.
 uint8_t img_load(img_slice path, gs_rref out, int32_t *w, int32_t *h) {
     int64_t size = 0;
@@ -318,6 +353,41 @@ static void png_chunk(gs_rref out, const char *kind, const uint8_t *body,
     c = crc32_update(c, body, n) ^ 0xffffffffu;
     put32(crc, c);
     gs_bld_append(out, crc, 4);
+}
+
+// img_encode16 writes RGBA pixels of 16 bits as a PNG of bit depth 16.
+// Each row takes filter 0 and big endian samples. The pixels come in as u16 values.
+uint8_t img_encode16(img_slice pixels, gs_rref out, int32_t w, int32_t h) {
+    if (w <= 0 || h <= 0 || w > 0x3fffffff / 8 || h > 0x3fffffff / 8) return 0;
+    int64_t row = (int64_t)w * 8 + 1;
+    if (row * h > 0x7fffffff || pixels.len < (int64_t)w * h * 4) return 0;
+    const uint16_t *src = (const uint16_t *)pixels.data;
+    uint8_t *raw = (uint8_t *)malloc((size_t)(row * h));
+    if (!raw) return 0;
+    for (int64_t y = 0; y < h; y++) {
+        uint8_t *d = raw + y * row;
+        *d++ = 0;
+        for (int64_t i = 0; i < (int64_t)w * 4; i++) {
+            uint16_t v = src[y * w * 4 + i];
+            *d++ = (uint8_t)(v >> 8);
+            *d++ = (uint8_t)v;
+        }
+    }
+    int zlen = 0;
+    uint8_t *z = stbi_zlib_compress(raw, (int)(row * h), &zlen, 8);
+    free(raw);
+    if (!z) return 0;
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    uint8_t ihdr[13];
+    put32(ihdr, (uint32_t)w);
+    put32(ihdr + 4, (uint32_t)h);
+    ihdr[8] = 16; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    gs_bld_append(out, sig, 8);
+    png_chunk(out, "IHDR", ihdr, 13);
+    png_chunk(out, "IDAT", z, zlen);
+    png_chunk(out, "IEND", NULL, 0);
+    STBIW_FREE(z);
+    return 1;
 }
 
 // img_meta reads the ICC profile and the EXIF block of encoded bytes.
