@@ -7,6 +7,7 @@ import std;
 import os;
 import image from "..";
 import geometry_cases;
+import webp_cases;
 
 fn test_round_trip() {
     // A 4x3 image: every pixel holds the color of its place.
@@ -489,6 +490,103 @@ fn meta_cases() {
     print("metadata cases ok\n");
 }
 
+// test_webp checks the codec: the files of Pillow, the writer of the package
+// and the hostile bytes.
+fn test_webp() {
+    webp_cases::check_decode();
+    webp_cases::check_hostile();
+
+    // A lossless write keeps every pixel, also under a clear alpha.
+    var img = make_busy();
+    image::set_pixel(img, 3, 3, 12, 34, 56, 0);
+    let ll = image::encode_webp(img, 100, true);
+    assert(ll.len > 12 && ll[0] == 'R' && ll[8] == 'W');
+    let back = image::decode(ll);
+    assert(back.width == 32 && back.height == 32 && back.pixels == img.pixels);
+    // The same bytes come out of a second write, and a second round is stable.
+    assert(image::encode_webp(img, 100, true) == ll);
+    assert(image::encode_webp(back, 100, true) == ll);
+
+    // A lossy write keeps the size and a close color. The quality changes the size.
+    let flat = image::new_image(64, 64, 90, 160, 30, 255);
+    let lo = image::encode_webp(img, 10, false);
+    let hi = image::encode_webp(img, 100, false);
+    assert(lo.len > 0 && hi.len > lo.len);
+    let lb = image::decode(hi);
+    assert(lb.width == 32 && lb.height == 32);
+    let r, g, b, a = image::pixel(lb, 16, 16);
+    let r0, g0, b0, a0 = image::pixel(img, 16, 16);
+    assert(near(r, r0, 30) && near(g, g0, 30) && near(b, b0, 30) && a == 255);
+    let fb = image::decode(image::encode_webp(flat, 90, false));
+    let fr, fg, fbl, fa = image::pixel(fb, 40, 40);
+    assert(near(fr, 90, 6) && near(fg, 160, 6) && near(fbl, 30, 6) && fa == 255);
+    // The lossy alpha survives.
+    let tr = image::new_image(8, 8, 200, 100, 50, 77);
+    let ta = image::decode(image::encode_webp(tr, 90, false));
+    let ar, ag, ab, aa = image::pixel(ta, 4, 4);
+    assert(aa == 77);
+
+    // encode and write take the format. The param is the quality.
+    let via = image::encode(img, image::FORMAT_WEBP, 50);
+    assert(via.len > 0 && image::decode(via).width == 32);
+    // The file that the Python check reads back with Pillow. It holds the
+    // plain image, without the clear pixel of the test above.
+    var plain = make_busy();
+    assert(image::write("test-image.webp", plain, image::FORMAT_WEBP));
+    let fl = image::load("test-image.webp");
+    assert(fl.width == 32 && fl.height == 32);
+    let fm = image::metadata("test-image.webp");
+    assert(fm.ok && fm.kind == image::KIND_WEBP && fm.width == 32 && fm.height == 32);
+    let mm = image::metadata_bytes(ll);
+    assert(mm.ok && mm.kind == image::KIND_WEBP && mm.width == 32);
+    // The old format numbers keep their values.
+    assert(image::FORMAT_PNG == 0 && image::FORMAT_JPEG == 1 && image::FORMAT_BMP == 2);
+    assert(image::FORMAT_TGA == 3 && image::FORMAT_HDR == 4 && image::FORMAT_WEBP == 5);
+    assert(image::KIND_PIC == 9 && image::KIND_WEBP == 10);
+
+    // Bad input to the writer gives the empty result.
+    let none = image::Image { width: 4, height: 4, pixels: [], icc: [], exif: [] };
+    assert(image::encode_webp(none, 80, false).len == 0);
+    assert(image::encode_webp(none, 80, true).len == 0);
+    let wide = image::Image { width: 16384, height: 1, pixels: [], icc: [], exif: [] };
+    assert(image::encode_webp(wide, 80, true).len == 0);
+    let big = image::new_image(16384, 1, 1, 2, 3, 4);
+    assert(image::encode_webp(big, 80, true).len == 0);
+    // A quality out of range does not abort.
+    assert(image::encode_webp(img, -5, false).len > 0);
+    assert(image::encode_webp(img, 900, false).len > 0);
+
+    // Hostile bytes: a cut file, a wrong size, a header with no body.
+    for n in 0..ll.len {
+        if n % 7 != 0 { continue; }
+        var cut: u8[>..] = [];
+        cut.append(ll[..n]);
+        let c = image::decode(cut[..]);
+        assert(c.pixels.len == 0 || c.pixels.len == 32 * 32 * 4);
+        image::metadata_bytes(cut[..]);
+    }
+    var cut2: u8[>..] = [];
+    cut2.append(hi[..hi.len / 2]);
+    assert(image::decode(cut2[..]).pixels.len == 0 || image::decode(cut2[..]).width == 32);
+    assert(image::decode("RIFF").width == 0);
+    assert(image::decode("RIFF\x04\x00\x00\x00WEBP").width == 0);
+    assert(!image::metadata_bytes("RIFF\x04\x00\x00\x00WEBPVP8 ").ok);
+    // A lossless header that claims 16384 x 16384 pixels and holds no data.
+    var lie: u8[>..] = [];
+    lie.append(ll[..30]);
+    lie[4] = 0xff; lie[5] = 0xff; lie[6] = 0xff; lie[7] = 0x00;
+    assert(image::decode(lie[..]).pixels.len == 0 || image::decode(lie[..]).width == 32);
+    // The same file with a flipped dimension byte decodes to nothing or to a size
+    // that matches the bytes.
+    var bent: u8[>..] = [];
+    bent.append(ll[..ll.len]);
+    bent[21] = 0xff;
+    bent[22] = 0xff;
+    let bi = image::decode(bent[..]);
+    assert(bi.pixels.len == bi.width * bi.height * 4);
+    print("webp cases ok\n");
+}
+
 fn main() {
     meta_cases();
     test_round_trip();
@@ -501,6 +599,7 @@ fn main() {
     test_resize();
     test_geometry();
     test_hostile_size();
+    test_webp();
     print("all tests passed");
     return 0;
 }
