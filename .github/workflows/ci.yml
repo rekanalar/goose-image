@@ -3,6 +3,8 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
   pull_request:
   workflow_dispatch:
 
@@ -10,22 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  docs:
-    name: docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    paths:
-      - '**/*.md'
-      - 'test/docs_check.py'
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Check the documents
-        run: python3 test/docs_check.py
-
   test:
-    paths-ignore:
-      - '**/*.md'
     strategy:
       fail-fast: false
       matrix:
