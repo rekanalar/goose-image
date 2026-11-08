@@ -116,7 +116,7 @@ Python `Pillow` 12.3.0 has a different rule. Its `MAX_IMAGE_PIXELS` is 89478485.
 
 The rule of `Pillow` refuses only above 178956970 pixels. The caps of this package are below that count on every path.
 
-The reader of the EXIF tags reads bytes of a stranger. It holds every read inside the block. It reads at most 64 lists and 1048576 bytes for one value. The author ran ten broken blocks against it. Each one breaks the block in another way. Every one gives an empty value. Nothing aborts.
+The reader of the EXIF tags reads bytes of a stranger. It holds every read inside the block. It reads at most 64 lists and 1048576 bytes for one value. The author ran ten broken blocks against it, one break in each. Every one gives an empty value. Nothing aborts.
 
 Risks that stay:
 
